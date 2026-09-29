@@ -1,0 +1,18 @@
+# ONNX model package (469 MB) — download it, see README:
+#   hf download Nimaone/pocket-tts-farsi-v2-onnx --local-dir model/onnx
+model/onnx/
+
+# Generated audio
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+env/
+.venv/
+venv/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
