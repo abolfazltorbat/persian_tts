@@ -1,0 +1,5 @@
+# Optional comparison runtime; keep the lightweight ONNX install separate.
+-r requirements.txt
+qwen-tts==0.1.1
+cmudict>=1.0
+

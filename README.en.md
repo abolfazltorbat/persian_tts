@@ -1,3 +1,7 @@
+## Persian model comparison
+
+The web app now supports **Pocket TTS Farsi v2 / Qwen3-TTS / side-by-side comparison**, shared Persian text preparation, test sentences, listening ratings and JSON exports. Qwen's Persian output is **experimental (not an officially supported language)**. See [installation and evaluation guide](docs/comparison.md).
+
 <div align="center">
 
 <img src="web/logo.png" width="128" alt="ParSiGo logo">

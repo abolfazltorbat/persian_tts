@@ -121,6 +121,34 @@ def _g2p_windows(text: str) -> list[str]:
             + _g2p_windows(" ".join(words[cut:])))
 
 
+# consonant classes for _skeleton_agrees: script letter -> phoneme class.
+# Vowel-or-consonant letters (ا و ی), the glottal letters and h are skipped
+# on both sides (h is weak and ه also writes the vowel e).
+_SPELL_CLASS = {
+    "ب": "b", "پ": "p", "ت": "t", "ط": "t", "ث": "s", "س": "s", "ص": "s",
+    "ج": "j", "چ": "C", "خ": "x", "د": "d", "ذ": "z", "ز": "z", "ض": "z",
+    "ظ": "z", "ر": "r", "ژ": ";", "ش": "S", "ق": "q", "غ": "q", "ف": "f",
+    "ک": "k", "گ": "g", "ل": "l", "م": "m", "ن": "n",
+}
+_PH_CONSONANTS = set("bptsjCxdzr;SqfkglmnZ")
+
+
+def _collapse(s: str) -> str:
+    return re.sub(r"(.)\1+", r"\1", s)
+
+
+def _skeleton_agrees(word: str, ph: str) -> bool:
+    """Do the phonemes carry exactly the consonants the spelling writes?
+    Gemination (tashdid is not written) and tanvin ("-an", written as a mark)
+    are allowed for."""
+    spell = _collapse("".join(_SPELL_CLASS.get(c, "") for c in word))
+    got = "".join(c for c in ph.replace("1", "") if c in _PH_CONSONANTS).replace("Z", ";")
+    got = _collapse(got)
+    if "\u064b" in word and got.endswith("n") and not spell.endswith("n"):
+        got = got[:-1]
+    return got == spell
+
+
 def transliterate_text(text: str) -> str:
     """Latin -> Persian transliteration only (the text pre-processing step
     of phonemise, without the G2P). Lets callers count the words the G2P
@@ -180,7 +208,40 @@ class OnnxG2P:
         # the TTS model sees the text.
         out = raw.translate(TO_PHONEMES)
         out = " ".join(_PRON_FIX.get(w, w) for w in out.split())
+        out = self._consensus(text, out)
         return out if keep_ezafe else out.replace("1", "")
+
+    def _consensus(self, text: str, phonemes: str) -> str:
+        """Repair in-context slips against the SPELLING.
+
+        Persian script writes every consonant, so a word's consonants are not
+        a matter of opinion — only its vowels are. Decoding a whole phrase,
+        GE2P occasionally gets a consonant wrong that it gets right for the
+        word alone (منتظرت -> "monta;eret" in «پس منتظرت می‌مانم», "montazeret"
+        alone; کتاب‌هایشان -> "…eshAn" with s+h for ش). Measured: 2 of 444
+        words in Dana-like text. Such a word is re-read on its own and used
+        when THAT reading agrees with the spelling; the contextual ezafe is
+        kept. Words whose context reading agrees with the spelling — nearly
+        all — are never touched, so homograph disambiguation by context
+        (vowels) is unaffected."""
+        words = text.split()
+        ph = phonemes.split()
+        if len(words) != len(ph):
+            return phonemes
+        out = []
+        for w, p in zip(words, ph):
+            if _skeleton_agrees(w, p):
+                out.append(p)
+                continue
+            alone = self._decode_greedy(w).translate(TO_PHONEMES).replace("1", "")
+            alone = _PRON_FIX.get(alone, alone)
+            if not alone or not _skeleton_agrees(w, alone):
+                out.append(p)
+                continue
+            if p.endswith("1"):                      # keep the ezafe
+                alone += ("ye" if alone[-1] in "aAeiou" else "e") + "1"
+            out.append(alone)
+        return " ".join(out)
 
 
 if __name__ == "__main__":

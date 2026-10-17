@@ -1,11 +1,13 @@
-# Demo web server for the pure-ONNX Persian TTS engine.
+# Local Persian TTS server: Pocket ONNX plus optional Qwen3-TTS comparison.
 #
 #   python scripts/server.py     -> http://127.0.0.1:8770
 #
 # Endpoints:
 #   GET  /                  the single-page UI (web/index.html)
 #   GET  /api/voices        available reference voices (builtin + uploaded)
-#   POST /api/tts           {text, voice} -> {id, phonemes, duration, ...}
+#   POST /api/tts           {text, voice, model?} -> audio metadata
+#   POST /api/jobs          asynchronous single-model or comparison run
+#   GET  /api/jobs/{id}     progress and per-model results/errors
 #   GET  /api/audio/{id}    generated WAV
 #   POST /api/voice/upload  upload a custom voice (auto-trimmed to 5 s)
 import io
@@ -16,6 +18,10 @@ import sys
 import threading
 import time
 import uuid
+import copy
+import hashlib
+import logging
+from typing import Literal
 from pathlib import Path
 
 import numpy as np
@@ -23,10 +29,14 @@ import soundfile as sf
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE / "scripts"))
+sys.path.insert(0, str(BASE))
+from persian_text import prepare_persian, PERSIAN_CASES
+from qwen_backend import QwenBackend, QwenUnavailable
 
 WEB = BASE / "web" / "index.html"
 UPLOAD_DIR = BASE / "uploads" / "voices"
@@ -38,14 +48,23 @@ MAX_VOICES = 64
 
 BUILTIN_VOICE_META = {
     "male_hello.wav": ("آقا · صمیمی", "صدای مرد، لحن آرام و دوستانه"),
+    "male_hello_clean.wav": ("آقا · صمیمی پاک‌سازی‌شده", "نسخه بدون جهش صدای ابتدای کلیپ"),
+    "female_narration_clean.wav": ("بانو · روایت (پاک‌سازی‌شده)",
+                                   "همان صدا، بدون جملهٔ خودِ نمونه که در پاسخ‌ها تکرار می‌شد"),
     "female_narration.wav": ("بانو · روایت", "صدای زن، روایت‌گر"),
     "male_news.wav": ("آقا · خبری", "صدای مرد، لحن خبرگزاری"),
 }
 
 app = FastAPI(title="پارسی‌گو — Persian TTS demo")
+app.mount("/fonts", StaticFiles(directory=BASE / "web" / "fonts"), name="fonts")
+app.mount("/assets", StaticFiles(directory=BASE / "web"), name="assets")
 
 _engine = None
-_engine_lock = threading.Lock()
+_engine_lock = threading.RLock()
+_qwen = QwenBackend()
+_jobs: dict[str, dict] = {}
+_jobs_lock = threading.Lock()
+_job_running = False
 _audio_store: dict[str, dict] = {}
 _store_lock = threading.Lock()
 
@@ -65,19 +84,19 @@ SR: int = json.loads((PKG / "manifest.json").read_text(encoding="utf-8"))["const
 
 def get_engine():
     global _engine
-    if _engine is None:
-        from tts_onnx import OnnxTts
-
-        _engine = OnnxTts()
-        if not hasattr(_engine, "_g2p"):
+    with _engine_lock:
+        if _engine is None:
+            from tts_onnx import OnnxTts
             from g2p_onnx import OnnxG2P
-
-            _engine._g2p = OnnxG2P(_engine.dir)
+            from speak import _MixedG2P
+            engine = OnnxTts()
+            engine._g2p = _MixedG2P(OnnxG2P(engine.dir))
+            _engine = engine
     return _engine
 
 
 def split_sentences(text: str) -> list[str]:
-    parts = re.split(r"(?<=[.!؟])\s+", text.strip())
+    parts = re.split(r"(?<=[.!?؟])\s+|\n+", text.strip())
     return [p.strip() for p in parts if p.strip()]
 
 
@@ -105,15 +124,25 @@ def voice_path(voice_id: str) -> Path:
 
 
 class TTSRequest(BaseModel):
-    text: str
+    text: str = Field(min_length=1, max_length=MAX_TEXT)
     voice: str
-    pace: float = 1.0
-    mode: str = "split"   # split: pause at every punctuation | pack: long breaths
+    pace: float = Field(default=1.0, ge=0.6, le=1.5, allow_inf_nan=False)
+    mode: Literal["split", "pack"] = "split"
+    model: Literal["pocket", "qwen"] = "pocket"
+    prepare: bool = True
+    seed: int = Field(default=42, ge=0, le=2**32 - 1)
+    ref_text: str = Field(default="", max_length=800)
+
+
+class JobRequest(TTSRequest):
+    model: Literal["pocket", "qwen", "compare"] = "compare"
+    case_id: str = Field(default="custom", max_length=40)
 
 
 class PhonemizeRequest(BaseModel):
     text: str
     mode: str = "split"
+    prepare: bool = True
 
 
 class PhonemeTTSRequest(BaseModel):
@@ -135,7 +164,9 @@ def voices():
 @app.get("/api/config")
 def config():
     """UI bootstrap values — the text cap lives here, not hardcoded in the HTML."""
-    return {"max_text": MAX_TEXT, "max_phonemes": MAX_PHONEMES}
+    return {"max_text": MAX_TEXT, "max_phonemes": MAX_PHONEMES,
+            "models": [{"id": "pocket", "name": "Pocket TTS Farsi v2", "ready": True,
+                        "persian_supported": True}, _qwen.status()], "cases": PERSIAN_CASES}
 
 
 @app.post("/api/phonemize")
@@ -148,18 +179,29 @@ def phonemize(req: PhonemizeRequest):
         raise HTTPException(400, f"متن طولانی است (حداکثر {MAX_TEXT} نویسه)")
     if req.mode not in ("split", "pack"):
         raise HTTPException(400, "حالت گفتار باید split یا pack باشد")
-
     engine = get_engine()
     phonemes_all = []
-    with _engine_lock:
-        for sent in split_sentences(text):
+    if req.prepare:
+        # the same front-end synthesis uses (render_pocket), so the editable
+        # phonemes are exactly what would have been spoken
+        import frontend
+        with _engine_lock:
             try:
-                plan = plan_phrases(sent, engine._g2p, engine.sp)
+                _, plans = frontend.plan(engine, text, pack=req.mode == "pack")
             except ValueError as e:
                 raise HTTPException(400, "متن فارسی معتبری پیدا نشد") from e
-            if req.mode == "pack":
-                plan = pack_phrases(plan)
+        for plan in plans:
             phonemes_all.extend(p.replace("1", "") for p, _ in plan)
+    else:
+        with _engine_lock:
+            for sent in split_sentences(text):
+                try:
+                    plan = plan_phrases(sent, engine._g2p, engine.sp)
+                except ValueError as e:
+                    raise HTTPException(400, "متن فارسی معتبری پیدا نشد") from e
+                if req.mode == "pack":
+                    plan = pack_phrases(plan)
+                phonemes_all.extend(p.replace("1", "") for p, _ in plan)
 
     phonemes = " ".join(phonemes_all).strip()
     if not phonemes:
@@ -197,6 +239,8 @@ def tts_phonemes(req: PhonemeTTSRequest):
             "duration": duration,
             "phonemes": phonemes,
         }
+        while len(_audio_store) > 128:
+            _audio_store.pop(next(iter(_audio_store)))
     return {
         "id": audio_id,
         "phonemes": phonemes,
@@ -208,70 +252,214 @@ def tts_phonemes(req: PhonemeTTSRequest):
     }
 
 
-@app.post("/api/tts")
-def tts(req: TTSRequest):
-    text = req.text.strip()
-    if not text:
-        raise HTTPException(400, "متن خالی است")
-    if len(text) > MAX_TEXT:
-        raise HTTPException(400, f"متن طولانی است (حداکثر {MAX_TEXT} نویسه)")
-
+def render_pocket(req, text):
+    start = time.perf_counter()
     engine = get_engine()
-    pace = float(min(max(req.pace, 0.6), 1.5))
-    if req.mode not in ("split", "pack"):
-        raise HTTPException(400, "حالت گفتار باید split یا pack باشد")
+    load_seconds = time.perf_counter() - start
+    start = time.perf_counter()
+    pace = req.pace
     phonemes_all, chunks = [], []
 
-    with _engine_lock:
-        for sent in split_sentences(text):
-            # punctuation-aware plan: each phrase (comma/dash/colon-delimited)
-            # is a pause unit with its own gap, and short lead-ins ending in
-            # strong punctuation ("سؤال اصلی:") stay standalone
+    if req.prepare:
+        # The chatbot's path (scripts/frontend.py): dates, units, currency,
+        # ranges and English numbers read as words in the sentence's own
+        # language, then every unit of every sentence in one parallel batch.
+        # It reads the RAW text — prepare_persian already spelled the digits,
+        # and «۱۴۰۳/۰۵/۲۰» spelled digit-run by digit-run is not a date.
+        import frontend
+        with _engine_lock:
             try:
-                plan = plan_phrases(sent, engine._g2p, engine.sp)
+                sents, plans = frontend.plan(engine, req.text, pack=req.mode == "pack")
             except ValueError as e:
                 raise HTTPException(400, "متن فارسی معتبری پیدا نشد") from e
-            if req.mode == "pack":
-                plan = pack_phrases(plan)
-            if not plan:
-                continue
-            # model card: retry a runaway once (stochastic; 2nd attempt usually ends)
-            tokens = sum(len(engine.sp.encode(p.replace("1", ""), out_type=int))
-                         for p, _ in plan)
-            cap = tokens / engine.tps_est + engine.gen_pad + 1
-            for attempt in range(2):
-                audio = engine.synthesize(plan, voice_path(req.voice), pace=pace)
-                if len(audio) / SR <= cap + 2.0:  # multi-chunk texts run longer
-                    break
+            if not plans:
+                raise HTTPException(400, "متنی برای ساخت صدا پیدا نشد")
+            audios = engine.synthesize_many(plans, voice_path(req.voice), pace=pace,
+                                            langs=[x.lang for x in sents], seed=req.seed)
+        for plan, audio in zip(plans, audios):
             phonemes_all.append(" ".join(p.replace("1", "") for p, _ in plan))
-            chunks.append(audio)
-            chunks.append(np.zeros(int(PAUSE_S / pace * SR), dtype=audio.dtype))
+            chunks += [audio, np.zeros(int(PAUSE_S / pace * SR), dtype=audio.dtype)]
+    else:
+        with _engine_lock:
+            engine.rng = np.random.default_rng(req.seed)
+            for sent in split_sentences(text):
+                # punctuation-aware plan: each phrase (comma/dash/colon-delimited)
+                # is a pause unit with its own gap, and short lead-ins ending in
+                # strong punctuation ("سؤال اصلی:") stay standalone
+                try:
+                    plan = plan_phrases(sent, engine._g2p, engine.sp)
+                except ValueError as e:
+                    raise HTTPException(400, "متن فارسی معتبری پیدا نشد") from e
+                if req.mode == "pack":
+                    plan = pack_phrases(plan)
+                if not plan:
+                    continue
+                # model card: retry a runaway once (stochastic; 2nd attempt usually ends)
+                tokens = sum(len(engine.sp.encode(p.replace("1", ""), out_type=int))
+                             for p, _ in plan)
+                cap = tokens / engine.tps_est + engine.gen_pad + 1
+                for attempt in range(2):
+                    audio = engine.synthesize(plan, voice_path(req.voice), pace=pace)
+                    if len(audio) / SR <= cap + 2.0:  # multi-chunk texts run longer
+                        break
+                phonemes_all.append(" ".join(p.replace("1", "") for p, _ in plan))
+                chunks.append(audio)
+                chunks.append(np.zeros(int(PAUSE_S / pace * SR), dtype=audio.dtype))
 
     if not chunks:
         raise HTTPException(400, "متنی برای ساخت صدا پیدا نشد")
     audio = np.concatenate(chunks[:-1])  # drop trailing pause
-    duration = len(audio) / SR
-
-    buf = io.BytesIO()
-    sf.write(buf, audio, SR, format="WAV")
-    audio_id = uuid.uuid4().hex[:12]
-    with _store_lock:
-        _audio_store[audio_id] = {
-            "wav": buf.getvalue(),
-            "text": text,
-            "voice": req.voice,
-            "duration": duration,
-            "phonemes": " ".join(phonemes_all),
-        }
-    return {
-        "id": audio_id,
+    return audio, SR, {
         "phonemes": " ".join(phonemes_all),
-        "duration": round(duration, 2),
-        "pace": pace,
-        "mode": req.mode,
         "sentences": len(phonemes_all),
-        "elapsed": None,
+        "model_name": "pocket-tts-farsi-v2 (ONNX)", "device": "cpu",
+        "persian_supported": True, "warnings": [],
+        "load_seconds": round(load_seconds, 3),
+        "generation_seconds": round(time.perf_counter() - start, 3),
     }
+
+
+def validate_text(req):
+    text = prepare_persian(req.text, req.prepare)
+    if not any(c.isalnum() for c in text):
+        raise HTTPException(400, "متن باید حداقل یک حرف یا عدد داشته باشد")
+    # Number expansion can multiply the raw request length substantially.
+    if len(text) > 6000:
+        raise HTTPException(400, "متن پس از آماده‌سازی بسیار طولانی است")
+    voice_path(req.voice)
+    return text
+
+
+def reference_audio(voice):
+    path = voice_path(voice)
+    with sf.SoundFile(path) as f:
+        sr = f.samplerate
+        wav = f.read(5 * sr, dtype="float32", always_2d=True).mean(axis=1)
+    if len(wav) < sr or not np.isfinite(wav).all() or np.max(np.abs(wav)) < 1e-5:
+        raise HTTPException(400, "صدای مرجع باید حداقل یک ثانیه و شامل گفتار باشد")
+    return wav, sr
+
+
+def match_level(audio, sr):
+    """Speech-frame RMS matching, not a perceptual quality score or denoising."""
+    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if not len(audio) or not np.isfinite(audio).all():
+        raise ValueError("صوت معتبر تولید نشد")
+    peak = float(np.max(np.abs(audio)))
+    if peak < 1e-6:
+        raise ValueError("مدل فقط سکوت تولید کرد")
+    hop = max(1, int(sr * .02))
+    powers = np.array([np.mean(audio[i:i + hop] ** 2) for i in range(0, len(audio), hop)])
+    active = powers[powers > max(float(powers.max()) * .01, 1e-10)]
+    rms = float(np.sqrt(active.mean()))
+    gain = min(10 ** (-23 / 20) / max(rms, 1e-8), .95 / peak, 10.0)
+    return audio * gain, round(20 * np.log10(gain), 3)
+
+
+def generate(req, model, progress=None):
+    text = validate_text(req)
+    reference, reference_sr = reference_audio(req.voice)
+    with _engine_lock:
+        if model == "pocket":
+            wav, sr, meta = render_pocket(req, text)
+        else:
+            wav, sr, meta = _qwen.synthesize(text, reference, reference_sr,
+                ref_text=req.ref_text, seed=req.seed, pace=req.pace, progress=progress)
+    wav, gain_db = match_level(wav, sr)
+    duration = len(wav) / sr
+    audio_id = uuid.uuid4().hex[:12]
+    result = {"id": audio_id, "model": model, "text": req.text, "prepared_text": text,
+              "voice": req.voice, "reference_sha256": hashlib.sha256(reference.tobytes()).hexdigest(),
+              "reference_seconds": round(len(reference) / reference_sr, 3),
+              "sample_rate": sr, "duration": round(duration, 3), "pace": req.pace,
+              "mode": req.mode if model == "pocket" else "sentence chunks",
+              "seed": req.seed, "prepare": req.prepare, "phonemes": "", **meta,
+              "level_gain_db": gain_db, "audio_url": f"/api/audio/{audio_id}"}
+    result["rtf"] = round(meta["generation_seconds"] / duration, 3)
+    result["elapsed"] = round(meta["load_seconds"] + meta["generation_seconds"], 3)
+    buf = io.BytesIO()
+    sf.write(buf, wav, sr, format="WAV", subtype="PCM_16")
+    with _store_lock:
+        _audio_store[audio_id] = {"wav": buf.getvalue(), **result}
+        while len(_audio_store) > 128:
+            _audio_store.pop(next(iter(_audio_store)))
+    return result
+
+
+@app.post("/api/tts")
+def tts(req: TTSRequest):
+    try:
+        return generate(req, req.model)
+    except QwenUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+def run_job(job_id, req):
+    global _job_running
+    def progress(message):
+        with _jobs_lock:
+            _jobs[job_id]["progress"] = message
+    try:
+        for model in (["pocket", "qwen"] if req.model == "compare" else [req.model]):
+            progress(f"در حال ساخت با {model}…")
+            try:
+                result = generate(req, model, progress)
+            except Exception as exc:
+                logging.exception("TTS job %s failed for %s", job_id, model)
+                result = {"model": model, "error": str(exc.detail) if isinstance(exc, HTTPException) else str(exc)}
+            with _jobs_lock:
+                _jobs[job_id]["results"].append(result)
+        with _jobs_lock:
+            results = _jobs[job_id]["results"]
+            _jobs[job_id]["status"] = "complete" if all("error" not in r for r in results) else "partial" if any("id" in r for r in results) else "failed"
+            _jobs[job_id]["progress"] = "پایان پردازش"
+    finally:
+        with _jobs_lock:
+            _job_running = False
+
+
+@app.post("/api/jobs", status_code=202)
+def start_job(req: JobRequest):
+    global _job_running
+    prepared = validate_text(req)
+    reference_audio(req.voice)
+    with _jobs_lock:
+        if _job_running:
+            raise HTTPException(409, "یک تولید دیگر در حال اجرا است؛ تا پایان آن صبر کنید")
+        job_id = uuid.uuid4().hex[:12]
+        _jobs[job_id] = {"id": job_id, "status": "running", "progress": "در صف تولید",
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "request": req.model_dump(), "prepared_text": prepared, "results": [],
+            "evaluation": "Human listening ratings; RTF measures speed, not Persian quality.",
+            "comparison_notes": ["Both models receive the same prepared text and source reference (first 5 seconds).",
+                "Pocket applies its trained G2P, reference cleanup and synthesis retries; Qwen receives Persian script and Auto language.",
+                "Outputs use the same speech-frame RMS target with peak protection; this is not LUFS normalization.",
+                "The same seed identifies each run; different architectures do not share equivalent random samples.",
+                "Qwen reference transcript, when supplied, is extra conditioning unavailable to Pocket."]}
+        _job_running = True
+        while len(_jobs) > 64:
+            _jobs.pop(next(iter(_jobs)))
+    threading.Thread(target=run_job, args=(job_id, req), daemon=True).start()
+    return {"id": job_id, "status": "running"}
+
+
+@app.get("/api/jobs/{job_id}")
+def job_status(job_id: str):
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "آزمایش پیدا نشد")
+        return copy.deepcopy(job)
+
+
+@app.get("/api/reference/{voice_id}")
+def reference_preview(voice_id: str):
+    wav, sr = reference_audio(voice_id)
+    buf = io.BytesIO()
+    sf.write(buf, wav, sr, format="WAV")
+    return Response(buf.getvalue(), media_type="audio/wav")
 
 
 @app.get("/api/audio/{audio_id}")
@@ -287,7 +475,9 @@ def audio(audio_id: str):
 async def upload_voice(file: UploadFile = File(...)):
     import scipy.signal as sig
 
-    data = await file.read()
+    data = await file.read(20 * 1024 * 1024 + 1)
+    if len(data) > 20 * 1024 * 1024:
+        raise HTTPException(413, "حداکثر اندازه فایل ۲۰ مگابایت است")
     try:
         wav, sr = sf.read(io.BytesIO(data))
     except Exception:
@@ -301,6 +491,8 @@ async def upload_voice(file: UploadFile = File(...)):
     if len(wav) < SR:  # < 1 s is too short to clone
         raise HTTPException(400, "صدای مرجع باید حداقل ۱ ثانیه باشد")
     wav = wav[: 5 * SR]  # model card: prompts beyond 5 s are out of distribution
+    if not np.isfinite(wav).all() or np.max(np.abs(wav)) < 1e-5:
+        raise HTTPException(400, "صدای مرجع خالی یا نامعتبر است")
 
     vid = f"upload:{uuid.uuid4().hex[:8]}.wav"
     sf.write(UPLOAD_DIR / vid[7:], wav, SR, format="WAV")

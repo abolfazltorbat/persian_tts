@@ -11,6 +11,10 @@ __pycache__/
 env/
 .venv/
 venv/
+.venv-qwen/
+model/qwen3-tts*/
+.cache/
+.pytest_cache/
 
 # IDE / OS
 .idea/

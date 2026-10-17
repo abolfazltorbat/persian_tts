@@ -1,11 +1,21 @@
 """English words -> the pocket-tts Persian phoneme alphabet, offline.
 
 The TTS model only knows Persian phonemes (a A e i o u, b C d f g h j k l m
-n p q r s S t v x y z ?), so English comes out Persian-accented by design —
+n p q r s S t v x y z ? ;), so English comes out Persian-accented by design —
 there is no /th/, /w/ or /ng/ to render. What this avoids is the engine's
 default path, which spells an English word in Persian letters and asks the
 G2P to read it back: Persian script leaves short vowels unwritten, so
 "hello" -> "هلو" -> "holu". Going straight to phonemes keeps the vowels.
+
+Choices that follow the way Persian speakers actually say English (and that
+were checked on the Whisper round trip, eval/harness.py):
+
+* /θ/ -> t, /ð/ -> d ("three" = tri, "the" = de) — the convention of Persian
+  loanwords (تئوری، تریلر، آتن). Mapping /θ/ to s made "three" ?esri.
+* a word NOT in CMUdict is not handed straight to Persian transliteration:
+  an inflection of a known word ("embeddings", "tokenizer") or a compound of
+  two ("frontend", "dataset") is assembled from its parts first, and a short
+  table covers the tech names an assistant actually says.
 """
 import re
 
@@ -15,8 +25,8 @@ _ARPA = {
     "UH": "u", "UW": "u",
     "B": "b", "CH": "C", "D": "d", "DH": "d", "F": "f", "G": "g", "HH": "h",
     "JH": "j", "K": "k", "L": "l", "M": "m", "N": "n", "NG": "ng", "P": "p",
-    "R": "r", "S": "s", "SH": "S", "T": "t", "TH": "s", "V": "v", "W": "v",
-    "Y": "y", "Z": "z", "ZH": "j",
+    "R": "r", "S": "s", "SH": "S", "T": "t", "TH": "t", "V": "v", "W": "v",
+    "Y": "y", "Z": "z", "ZH": ";",
 }
 # spoken letter names, Persian convention (GPU -> jipiyu)
 _LETTERS = {
@@ -26,25 +36,137 @@ _LETTERS = {
     "s": "?es", "t": "ti", "u": "yu", "v": "vi", "w": "dablyu",
     "x": "?eyks", "y": "vAy", "z": "zed",
 }
-# words CMUdict pronounces in a way Persian speakers do not use
+# words CMUdict pronounces in a way Persian speakers do not use, or does not
+# have at all — the names an assistant says most
 _OVERRIDE = {
     "python": "pAyton", "windows": "vindoz", "linux": "linuks",
     "google": "gugel", "server": "server", "email": "?imeyl",
     "video": "vidiyo", "audio": "?odiyo", "menu": "meno",
     "chat": "Cat", "bot": "bot", "api": "?ey pi ?Ay",
+    "json": "jeyson", "anthropic": "?antropik", "claude": "kelod",
+    "kubernetes": "kubernetis", "openai": "?open ?ey ?Ay", "github": "git hAb",
+    "gitlab": "git lab", "ubuntu": "?ubuntu", "nvidia": "?envidiyA",
+    "pytorch": "pAy torC", "tensorflow": "tensor flo", "numpy": "nAm pAy",
+    "javascript": "jAvA ?eskript", "typescript": "tAyp ?eskript",
+    "django": "jango", "vue": "viyu", "wifi": "vAy fAy", "whatsapp": "vAts ?ap",
+    "tiktok": "tik tAk", "youtube": "yu tiyub", "instagram": "?instAgram",
+    "telegram": "telegrAm", "spotify": "?espAtifAy", "iphone": "?Ay fon",
+    "ipad": "?Ay pad", "macos": "mak ?o ?es", "ios": "?Ay ?o ?es",
+    "android": "?andeoyd", "llama": "lAmA", "gemini": "jeminAy",
+    "deepseek": "dip sik", "qwen": "kiven", "mistral": "mistrAl",
+    "huggingface": "hAging feys", "ai": "?ey ?Ay", "ok": "?okey",
+    "okay": "?okey", "online": "?AnlAyn", "offline": "?AflAyn",
+    "dana": "dAnA", "sql": "?es kiyu ?el", "html": "?eyC ti ?em ?el",
+    "css": "si ?es ?es", "url": "yu ?Ar ?el", "pdf": "pi di ?ef",
+    "gpu": "ji pi yu", "cpu": "si pi yu", "ram": "ram", "usb": "yu ?es bi",
+    "sms": "?es ?em ?es",
 }
 _VOWELS = set("aAeiou")
 _WORD = re.compile(r"[A-Za-z][A-Za-z']*")
+
+# Inflectional endings tried on a word CMUdict lacks: (ending, phonemes added
+# after the stem, stem spellings to try).
+_SUFFIXES = (
+    ("ization", "Ayzeysen", ("ize", "")), ("izer", "Ayzer", ("ize", "")),
+    ("izers", "Ayzerz", ("ize", "")), ("ings", "ingz", ("", "e")),
+    ("ing", "ing", ("", "e")), ("ers", "erz", ("", "e")), ("er", "er", ("", "e")),
+    ("ed", "d", ("", "e")), ("ly", "li", ("",)), ("ness", "nes", ("",)),
+    ("ment", "ment", ("",)), ("able", "Abel", ("", "e")), ("es", "iz", ("",)),
+    ("s", "s", ("",)),
+)
+
+_PREFIXES = (("re", "ri"), ("pre", "pri"), ("un", "?an"), ("non", "nAn"),
+             ("multi", "malti"), ("sub", "sab"), ("super", "super"),
+             ("inter", "?inter"), ("over", "?over"), ("under", "?ander"),
+             ("auto", "?Ato"), ("co", "ko"), ("de", "di"), ("micro", "mAykro"))
+
+_VOICELESS = set("ptkfsSC")
+
+
+def _voiced_ending(end: str, ph_end: str, stem_ph: str) -> str:
+    """-s / -ed follow the stem's last sound, as in English: cats/dogs,
+    stopped/played/wanted."""
+    last = stem_ph[-1:]
+    if end == "s":
+        return "s" if last in _VOICELESS else "z"
+    if end == "ed":
+        if last in ("t", "d"):
+            return "id"
+        return "t" if last in _VOICELESS else "d"
+    return ph_end
+
 
 _dict = None
 
 
 def _lookup(word):
+    """CMUdict is OPTIONAL: without it every word reads as None and the caller
+    falls back to the engine's Latin->Persian transliteration — a Persian-
+    accented reading rather than a failed synthesis."""
     global _dict
     if _dict is None:
-        import cmudict
-        _dict = cmudict.dict()
+        try:
+            import cmudict
+            _dict = cmudict.dict()
+        except Exception:
+            _dict = {}
     return _dict.get(word)
+
+
+def _arpa_to_ph(pron) -> str:
+    out = []
+    for p in pron:
+        sym, stress = p.rstrip("012"), p[-1] if p[-1].isdigit() else ""
+        if sym == "AH":
+            out.append("e" if stress == "0" else "a")   # schwa vs strut
+        else:
+            out.append(_ARPA.get(sym, ""))
+    return "".join(out).replace("ngg", "ng")
+
+
+def _onset(s: str) -> str:
+    """Persian phonotactics: no vowel-initial and no s+consonant onset."""
+    if not s:
+        return s
+    if s[0] in _VOWELS:
+        return "?" + s                                   # Persian onset rule
+    if s[0] == "s" and len(s) > 1 and s[1] not in _VOWELS:
+        return "?e" + s                                  # state -> ?esteyt
+    return s
+
+
+def _dict_ph(lw: str):
+    pron = _lookup(lw)
+    return _arpa_to_ph(pron[0]) if pron else None
+
+
+def _oov(lw: str):
+    """A word CMUdict lacks, assembled from parts it has."""
+    for end, ph_end, stems in _SUFFIXES:
+        if lw.endswith(end) and len(lw) - len(end) >= 3:
+            base = lw[: -len(end)]
+            for extra in stems:
+                stem = base + extra
+                ph = _OVERRIDE.get(stem) or _dict_ph(stem)
+                if ph:
+                    return ph + _voiced_ending(end, ph_end, ph)
+            # doubled consonant before -ing/-ed/-er ("running", "stopped")
+            if end in ("ing", "ed", "er", "ers") and len(base) >= 4 and base[-1] == base[-2]:
+                ph = _dict_ph(base[:-1])
+                if ph:
+                    return ph + _voiced_ending(end, ph_end, ph)
+    for pre, ph_pre in _PREFIXES:
+        if lw.startswith(pre) and len(lw) - len(pre) >= 4:
+            rest = lw[len(pre):]
+            ph = _OVERRIDE.get(rest) or _dict_ph(rest) or _oov(rest)
+            if ph:
+                return ph_pre + " " + _onset(ph)
+    if len(lw) >= 6:
+        for i in range(3, len(lw) - 2):
+            a, b = _OVERRIDE.get(lw[:i]) or _dict_ph(lw[:i]), _OVERRIDE.get(lw[i:]) or _dict_ph(lw[i:])
+            if a and b and len(lw[:i]) >= 3 and len(lw[i:]) >= 3:
+                return a + " " + _onset(b)
+    return None
 
 
 def word(w):
@@ -54,25 +176,13 @@ def word(w):
     if lw in _OVERRIDE:
         return _OVERRIDE[lw]
     if w.isupper() and 2 <= len(w) <= 5 and w.isalpha():
-        return "".join(_LETTERS[c] for c in lw)      # GPT -> jipiti
-    pron = _lookup(lw)
-    if not pron:
-        return None
-    out = []
-    for p in pron[0]:
-        sym, stress = p.rstrip("012"), p[-1] if p[-1].isdigit() else ""
-        if sym == "AH":
-            out.append("e" if stress == "0" else "a")   # schwa vs strut
-        else:
-            out.append(_ARPA.get(sym, ""))
-    s = "".join(out).replace("ngg", "ng")
+        return "".join(_LETTERS[c] for c in lw)         # GPT -> jipiti
+    s = _dict_ph(lw)
+    if not s:
+        s = _oov(lw)
     if not s:
         return None
-    if s[0] in _VOWELS:
-        s = "?" + s                                  # Persian onset rule
-    elif s[0] == "s" and len(s) > 1 and s[1] not in _VOWELS:
-        s = "?e" + s                                 # state -> ?esteyt
-    return s
+    return " ".join(_onset(part) for part in s.split())
 
 
 def split(text):

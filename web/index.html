@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>پارسی‌گو — تبدیل متن فارسی به گفتار</title>
+<link rel="stylesheet" href="/assets/comparison.css">
 <style>
 /* Vazirmatn v33.003 (SIL OFL 1.1, see fonts/OFL.txt) — bundled so the demo
    stays fully offline; variable weight covers the 400-800 weights used here */
@@ -195,14 +196,32 @@ footer b{color:var(--muted);font-weight:600}
       <h1>پارسی‌گو</h1>
       <div class="sub">تبدیل متن فارسی به گفتار، با کلونینگ صدای مرجع</div>
     </div>
-    <div class="badge">موتور ONNX · آفلاین · بدون torch</div>
+    <div class="badge">آزمایشگاه گفتار فارسی · محلی</div>
   </header>
 
   <div class="grid">
     <section class="panel">
+      <div class="experiment-controls">
+        <label for="modelSelect">مدل گفتار</label>
+        <select id="modelSelect">
+          <option value="pocket">Pocket TTS — مدل فعلی فارسی</option>
+          <option value="qwen">Qwen3-TTS — فارسی آزمایشی</option>
+          <option value="compare">مقایسهٔ هر دو مدل</option>
+        </select>
+        <p id="modelStatus" class="exp-hint" role="status">در حال بررسی مدل‌ها…</p>
+        <p id="qwenWarning" class="exp-warning" hidden>فارسی در زبان‌های رسمی Qwen نیست. این آزمایش، پشتیبانی یا کیفیت فارسی را تضمین نمی‌کند. اجرای CPU می‌تواند چند دقیقه طول بکشد.</p>
+        <label for="caseSelect">نمونه‌های ارزیابی فارسی</label>
+        <select id="caseSelect"><option value="custom">متن دلخواه</option></select>
+      </div>
       <div class="label"><span>متن فارسی</span><span class="cnt" id="cnt"></span></div>
       <textarea id="txt" placeholder="متن خود را بنویسید…">سلام، حال شما چطور است؟ امیدوارم روز خوبی داشته باشید.</textarea>
       <div class="chips" id="chips"></div>
+      <div class="experiment-options">
+        <label><input type="checkbox" id="prepareFa" checked> آماده‌سازی فارسی (عدد، ساعت و یکسان‌سازی حروف)</label>
+        <label for="seed">بذر تولید <input id="seed" type="number" min="0" max="4294967295" value="42"></label>
+        <label><input type="checkbox" id="blindMode" checked> مقایسه با نام پنهان تا زمان شنیدن</label>
+      </div>
+      <p class="exp-hint">برای واژه‌های مبهم، متن و نشانه‌های تلفظ را ویرایش کنید. هر دو مدل همین متن را دریافت می‌کنند؛ فونمِ دستی فقط برای Pocket است.</p>
       <div class="pace-row">
         <span class="plabel">حالت گفتار</span>
         <div class="pchips">
@@ -249,8 +268,27 @@ footer b{color:var(--muted);font-weight:600}
         <span style="font-size:11px;color:var(--faint)">صدای خودت را بده تا با آن حرف بزند (WAV)</span>
       </div>
       <input type="file" id="file" accept=".wav,.mp3,.ogg,.flac" hidden>
+      <label class="ref-label" for="referencePlayer">شنیدن کلیپ مرجع مشترک</label>
+      <audio id="referencePlayer" controls preload="none"></audio>
+      <div id="qwenReference" hidden>
+        <label class="ref-label" for="referenceText">متن دقیق همین کلیپ (اختیاری، برای Qwen)</label>
+        <textarea id="referenceText" maxlength="800" placeholder="فقط کلمات شنیده‌شده در کلیپ بالا…"></textarea>
+        <p class="exp-hint">یک گوینده، بدون موسیقی و با جملهٔ کامل بهتر است. فقط ۵ ثانیهٔ اول استفاده می‌شود؛ متن ادامهٔ فایل را ننویسید. بدون متن، Qwen فقط ویژگی صدای گوینده را می‌گیرد.</p>
+      </div>
     </aside>
   </div>
+
+  <section class="panel comparison" id="comparison" hidden>
+    <div class="comparison-heading"><h2>ارزیابی گفتار فارسی</h2><span id="jobStatus" role="status" aria-live="polite"></span></div>
+    <details><summary>متن آماده‌شده برای هر دو مدل</summary><p id="preparedText" dir="auto"></p></details>
+    <p class="exp-hint">امتیازها با شنیدن شما ثبت می‌شوند: ۱ ضعیف، ۵ عالی. سرعت تولید، معیار کیفیت فارسی نیست. برای نتیجهٔ بهتر، چند نمونه و چند بذر را امتحان کنید. سطح صداها برای مقایسه تنظیم می‌شود.</p>
+    <div class="comparison-grid" id="comparisonCards"></div>
+    <div class="comparison-actions">
+      <button class="ph-prep" id="revealModels" disabled>نمایش نام مدل‌ها و زمان تولید</button>
+      <button class="ph-prep" id="exportComparison" disabled>ذخیرهٔ گزارش JSON و امتیازها</button>
+    </div>
+    <p class="exp-hint">گزارش شامل متن، تنظیمات، خطاها و امتیازهاست. فایل‌های WAV را جداگانه دانلود کنید؛ صداها پس از راه‌اندازی مجدد سرور حذف می‌شوند.</p>
+  </section>
 
   <section class="panel result" id="result">
     <div class="label"><span>فونم‌های تولیدشده</span><span class="cnt" id="rmeta"></span></div>
@@ -275,7 +313,7 @@ footer b{color:var(--muted);font-weight:600}
     <div id="hist"></div>
   </section>
 
-  <footer>ساخته‌شده با <b>pocket-tts-farsi-v2</b> روی <b>ONNX Runtime</b> — کاملاً آفلاین، بدون GPU</footer>
+  <footer><b>Pocket TTS Farsi v2 · Qwen3-TTS</b> — تولید محلی پس از دریافت مدل‌ها · فارسی Qwen آزمایشی</footer>
 </div>
 <div class="toast" id="toast"></div>
 <audio id="au" preload="auto"></audio>
@@ -300,7 +338,7 @@ async function loadVoices() {
   const r = await fetch("/api/voices").then(r => r.json());
   VOICES = r.voices;
   if (!selVoice || !VOICES.find(v => v.id === selVoice))
-    selVoice = (VOICES[0] || {}).id;
+    selVoice = (VOICES.find(v => v.id === "female_narration.wav") || VOICES[0] || {}).id;
   renderVoices();
 }
 function renderVoices() {
@@ -311,10 +349,14 @@ function renderVoices() {
           ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M3 12h2l2-6 3 12 3-16 3 16 2-6h3"/></svg>'
           : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></svg>'}
       </span>
-      <span><div class="nm">${v.name}</div><div class="ds">${v.desc}</div></span>
+      <span><div class="nm">${escapeHtml(v.name)}</div><div class="ds">${escapeHtml(v.desc)}</div></span>
     </button>`).join("");
   document.querySelectorAll(".vcard").forEach(b =>
     b.onclick = () => { selVoice = b.dataset.id; renderVoices(); });
+  window.dispatchEvent(new Event("voicechange"));
+}
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 
 /* ---------- chips ---------- */
@@ -335,11 +377,11 @@ function faNum(x) { return fa(x).replace(".", "٫"); }
 function setPace(v, fromChip) {
   paceEl.value = v;
   $("paceVal").textContent = faNum((+v).toFixed(2)) + "×";
-  document.querySelectorAll(".pchip").forEach(c =>
+  document.querySelectorAll(".pchip[data-p]").forEach(c =>
     c.classList.toggle("sel", Math.abs(+c.dataset.p - v) < 0.01));
 }
 paceEl.addEventListener("input", () => setPace(paceEl.value));
-document.querySelectorAll(".pchip").forEach(c =>
+document.querySelectorAll(".pchip[data-p]").forEach(c =>
   c.onclick = () => setPace(c.dataset.p));
 setPace(1);
 
@@ -395,7 +437,7 @@ $("phPrep").onclick = async () => {
   try {
     const r = await fetch("/api/phonemize", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, mode }),
+      body: JSON.stringify({ text, mode, prepare: $("prepareFa").checked }),
     }).then(r => r.json());
     if (r.detail) return toast(typeof r.detail === "string" ? r.detail : "خطا در تبدیل به فونم");
     $("phInput").value = r.phonemes;
@@ -430,28 +472,7 @@ $("phGo").onclick = async () => {
   }
 };
 
-/* ---------- generate ---------- */
-$("go").onclick = async () => {
-  const text = $("txt").value.trim();
-  if (!text) return toast("متنی بنویسید");
-  $("go").disabled = true; $("go").classList.add("busy");
-  const t0 = performance.now();
-  const tick = setInterval(() =>
-    $("go").querySelector(".tx").textContent = `در حال ساخت… ${fa(((performance.now()-t0)/1000).toFixed(0))} ثانیه`, 250);
-  try {
-    const r = await fetch("/api/tts", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, voice: selVoice, pace: +paceEl.value, mode }),
-    }).then(r => r.json());
-    if (r.detail) return toast(typeof r.detail === "string" ? r.detail : "خطا در تولید");
-    await present(r, text);
-  } catch (e) { toast("ارتباط با سرور برقرار نشد"); }
-  finally {
-    clearInterval(tick);
-    $("go").disabled = false; $("go").classList.remove("busy");
-    $("go").querySelector(".tx").innerHTML = `<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="display:flex"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><path d="M12 18v4"/></svg> ساخت گفتار`;
-  }
-};
+/* Generation and comparisons are handled in /assets/comparison.js. */
 
 /* ---------- player ---------- */
 const cv = $("cv"), ctx = cv.getContext("2d");
@@ -557,7 +578,7 @@ function renderHistory() {
   $("hist").innerHTML = history.slice(0, HISTORY_SHOWN).map((h, i) => `
     <div class="hrow" data-i="${i}">
       <span class="hplay"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span>
-      <span class="htx">${h.text}</span>
+      <span class="htx">${escapeHtml(h.text)}</span>
       <span class="hd">${fa(h.dur)} ثانیه</span>
     </div>`).join("");
   document.querySelectorAll(".hrow").forEach(row => row.onclick = () => {
@@ -577,5 +598,6 @@ function renderHistory() {
 addEventListener("resize", () => draw(au.currentTime / (curDur || 1)));
 loadVoices();
 </script>
+<script src="/assets/comparison.js"></script>
 </body>
 </html>

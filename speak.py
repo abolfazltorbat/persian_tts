@@ -11,7 +11,6 @@ Handles Persian, mixed Persian+English and pure English text. English is
 rendered with the Persian phoneme inventory (see en_phonemes.py) — the model
 has no /th/, /w/ or /ng/, so English always sounds Persian-accented.
 """
-import re
 import sys
 from pathlib import Path
 
@@ -23,34 +22,16 @@ sys.path.insert(0, str(BASE / "scripts"))
 # male_hello.wav opens with a loud isolated burst that derails the model — it
 # drops words or speaks the reference clip's own sentence in ~2/3 of runs.
 # male_hello_clean.wav is the same voice with that burst trimmed off.
-VOICES = {"female_narration", "male_news", "male_hello_clean", "male_hello"}
-DEFAULT_VOICE = "female_narration"
+# female_narration_clean.wav (2026-10-11) is the 2 s crop «فهمه و آزاده کجا
+# رفتن» of female_narration: the full clip's own sentence surfaced inside
+# 4/66 harness renders, the crop in 0/66 (eval/harness.py, CER 9.2 → 7.9 %).
+VOICES = {"female_narration_clean", "female_narration", "male_news",
+          "male_hello_clean", "male_hello"}
+DEFAULT_VOICE = "female_narration_clean"
 
 
-class _MixedG2P:
-    """OnnxG2P + English. Same interface, so the engine's punctuation-aware
-    phrase planning is reused unchanged. English words resolvable by CMUdict
-    are phonemised directly; anything else is left in the text for the
-    engine's own Latin->Persian transliteration."""
-
-    # a leftover segment with no letters/digits is punctuation debris; the
-    # G2P raises ValueError("normalisation emptied the text") on it
-    _CONTENT = re.compile(r"[\u0600-\u06FF A-Za-z0-9\u06F0-\u06F9]".replace(" ", ""))
-
-    def __init__(self, inner):
-        self.inner = inner
-
-    def phonemise(self, text, keep_ezafe=False):
-        import en_phonemes
-        out = []
-        for kind, s in en_phonemes.split(text):
-            if kind == "en":
-                out.append(s)
-            elif self._CONTENT.search(s):
-                p = self.inner.phonemise(s, keep_ezafe=keep_ezafe)
-                if p:
-                    out.append(p)
-        return " ".join(out)
+# kept under the old name: scripts/server.py imports it from here
+from frontend import MixedG2P as _MixedG2P  # noqa: E402
 
 
 class PersianTTS:
@@ -69,9 +50,9 @@ class PersianTTS:
 
     def phonemes(self, text):
         """Text (any script) -> the phoneme string the model will speak."""
-        from tts_onnx import split_sentences
-        return " ".join(self.engine._g2p.phonemise(s)
-                        for s in split_sentences(text)).strip()
+        import frontend
+        return " ".join(self.engine._g2p.phonemise(s.text)
+                        for s in frontend.speakable(text)).strip()
 
     def say(self, text, out="output/out.wav", voice=None, pace=1.0,
             pack=False, seed=None):
@@ -101,31 +82,15 @@ class PersianTTS:
         return str(out)
 
     def _render(self, text, voice, pace, pack, seed):
-        # Mirrors OnnxTts.synthesize_text's TEXT branch, but always takes it.
-        # The engine picks the branch by looking for a Persian character
-        # (tts_onnx.py:474), so pure-English text falls through to the
-        # PHONEME branch and is spoken as phoneme letters — mush.
-        # It also drops seed= on that branch (:492), so seed the rng here.
-        import numpy as np
-        from tts_onnx import (split_sentences, plan_phrases, pack_phrases,
-                              SENTENCE_GAP)
-        if seed is not None:
-            self.engine.rng = np.random.default_rng(seed)
-        sentences = []
-        for sent in split_sentences(text):
-            plan = plan_phrases(sent, self.engine._g2p, self.engine.sp)
-            if pack:
-                plan = pack_phrases(plan)
-            if plan:
-                sentences.append(plan)
-        if not sentences:
-            return np.zeros(0, dtype=np.float32)
-        silence = np.zeros(int(SENTENCE_GAP * self.sample_rate), np.float32)
-        parts = []
-        for plan in sentences:
-            parts.append(self.engine.synthesize(plan, voice, pace=pace))
-            parts.append(silence)
-        return np.concatenate(parts[:-1]) if len(parts) > 1 else parts[0]
+        """The chatbot's path (scripts/frontend.py): digits/dates/units/
+        currency → words in the sentence's language, then every sub-chunk of
+        every sentence in one parallel batch. Always the TEXT branch — the
+        engine's own synthesize_text sends text with no Persian character to
+        its PHONEME branch, and English came out as phoneme letters."""
+        import frontend
+        audio, _ = frontend.render(self.engine, text, voice, seed=seed,
+                                   pace=pace, pack=pack)
+        return audio
 
 
 def main():

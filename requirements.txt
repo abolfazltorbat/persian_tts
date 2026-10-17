@@ -14,6 +14,7 @@ numpy>=2
 scipy>=1.5
 sentencepiece>=0.2.1
 soundfile>=0.12
+cmudict>=1.0        # mixed Persian/English pronunciation (also used by speak.py)
 
 # ---- مسیر torch (scripts/tts.py) — راه مرجع؛ برای توسعه و صحت‌سنجی ----
 # توجه: نسخه PyPI سه فلگ فارسی را ندارد؛ بعد از نصب، سه فایل فورک را

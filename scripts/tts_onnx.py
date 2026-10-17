@@ -29,6 +29,19 @@ _SENTENCE_SPLIT = re.compile(r"(?<=[.!?؟])\s+")
 _PHRASE_SPLIT = re.compile(r"(?<=[،؛:—–,;:)])\s+|\s+(?=\()")
 
 
+def session_providers() -> list[str]:
+    """CPU by default. PARSIGO_DEVICE=cuda asks for the GPU (onnxruntime-gpu),
+    filtered to what this onnxruntime build really has, so a CPU-only install
+    keeps working when the variable is set by mistake."""
+    if os.environ.get("PARSIGO_DEVICE", "cpu").lower() not in ("cuda", "gpu"):
+        return ["CPUExecutionProvider"]
+    # the CUDA EP prints a ScatterND advisory on EVERY graph run (dozens per
+    # sentence) from the default logger; errors still show at severity 3
+    ort.set_default_logger_severity(3)
+    have = set(ort.get_available_providers())
+    return [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in have]
+
+
 def split_sentences(text: str) -> list[str]:
     return [t.strip() for t in _SENTENCE_SPLIT.split(text.strip()) if t.strip()]
 
@@ -363,7 +376,7 @@ class OnnxTts:
         # to avoid 4x oversubscription on an 8-core box
         opts.intra_op_num_threads = 2
         opts.inter_op_num_threads = 1
-        prov = ["CPUExecutionProvider"]
+        prov = session_providers()
         self.s_flow = ort.InferenceSession(str(self.dir / "flow_lm_step.onnx"), opts, providers=prov)
         self.s_enc = ort.InferenceSession(str(self.dir / "mimi_encoder.onnx"), opts, providers=prov)
         self.s_dec = ort.InferenceSession(str(self.dir / "mimi_decoder_step_kv.onnx"), opts, providers=prov)
@@ -715,11 +728,12 @@ class OnnxTts:
         copy_state=True — a continued 100+ position context is out of
         distribution and causes early EOS = dropped words). `pace`
         (0.6..1.5) time-stretches the final audio uniformly."""
-        pace = float(np.clip(pace, 0.6, 1.5))
         if seed is not None:
             self.rng = np.random.default_rng(seed)
-        voice_cache, voice_off = self.voice_cache(voice_wav)
+        return self.synthesize_many([phonemes], voice_wav, pace=pace)[0]
 
+    def _jobs_for(self, phonemes) -> list[tuple[str, float]]:
+        """One sentence's phrase plan -> generation units [(chunk, gap_before)]."""
         if isinstance(phonemes, str):
             phrases = [(phonemes, None)]
         else:
@@ -729,9 +743,7 @@ class OnnxTts:
         # the original punctuation, so it lives in the text layer
         # (plan_phrases / merge_short_phrases); merging again here would
         # re-absorb a short colon lead-in that the caller kept standalone.
-
-        segments = []  # (audio, gap_before_seconds)
-        jobs = []      # (chunk, gap) — generation units
+        jobs = []
         for pi, (phrase, pgap) in enumerate(phrases):
             for ci, chunk in enumerate(self.chunk_phonemes(phrase)):
                 if pi == 0 and ci == 0:
@@ -741,35 +753,125 @@ class OnnxTts:
                 else:
                     gap = _CHUNK_GAP
                 jobs.append((chunk, gap))
+        return jobs
 
-        # chunks are independent (each generates from the pristine voice
-        # state), and batch-1 flow steps barely saturate the cores —
-        # generate them in parallel with per-chunk rngs
-        seeds = self.rng.integers(0, 2**63, size=max(1, len(jobs)))
-        if len(jobs) > 1:
+    #: Parallel generation units. Chunks are independent (each starts from
+    #: the pristine voice state) and a batch-1 flow step barely saturates
+    #: the cores, so they run on a thread pool; onnxruntime releases the GIL
+    #: inside Session.run.
+    workers = min(4, os.cpu_count() or 4)
+
+    def synthesize_many(self, plans, voice_wav, pace=1.0, langs=None, seed=None) -> list:
+        """Several sentences at once -> one audio array per sentence.
+
+        All generation units of ALL sentences go into one pool, so a
+        multi-sentence request keeps every worker busy instead of waiting
+        sentence by sentence (a 3-sentence paragraph used to run as three
+        serial rounds of 2-3 parallel chunks). Each unit gets its own rng
+        drawn from the engine rng — or from `seed`, which callers sharing
+        one engine across threads pass so the take is reproducible — so
+        results do not depend on scheduling."""
+        pace = float(np.clip(pace, 0.6, 1.5))
+        voice_cache, voice_off = self.voice_cache(voice_wav)
+        jobs, owner = [], []
+        for si, ph in enumerate(plans):
+            for job in self._jobs_for(ph):
+                jobs.append(job)
+                owner.append(si)
+        if not jobs:
+            return [np.zeros(0, dtype=np.float32) for _ in plans]
+        rng = np.random.default_rng(seed) if seed is not None else self.rng
+        seeds = rng.integers(0, 2**63, size=len(jobs))
+
+        def run(i):
+            lang = langs[owner[i]] if langs else "fa"
+            return self._generate_with_retry(
+                voice_cache, voice_off, jobs[i][0],
+                rng=np.random.default_rng(int(seeds[i])), lang=lang)
+
+        audios = self._run_units(run, range(len(jobs)))
+        if self.verifier is not None:
+            audios = self._verify_and_repair(jobs, owner, audios, voice_cache,
+                                             voice_off, langs, rng, len(plans))
+
+        out = []
+        for si in range(len(plans)):
+            segments = [(audios[i], jobs[i][1]) for i in range(len(jobs)) if owner[i] == si]
+            if not segments:
+                out.append(np.zeros(0, dtype=np.float32))
+                continue
+            audio = self._stitch(segments)
+            if abs(pace - 1.0) >= 0.03:
+                from pedalboard import time_stretch
+
+                audio = np.ascontiguousarray(audio, dtype=np.float32)
+                audio = time_stretch(audio, self.sample_rate,
+                                     stretch_factor=pace).reshape(-1)
+            out.append(audio.astype(np.float32))
+        return out
+
+    def _run_units(self, run, indices) -> list:
+        """run(i) for each index, on the worker pool; results in index order."""
+        idx = list(indices)
+        if len(idx) > 1 and self.workers > 1:
             from concurrent.futures import ThreadPoolExecutor
 
-            def run(i):
+            with ThreadPoolExecutor(max_workers=min(self.workers, len(idx))) as ex:
+                return list(ex.map(run, idx))
+        return [run(i) for i in idx]
+
+    def _verify_and_repair(self, jobs, owner, audios, voice_cache, voice_off,
+                           langs, rng, n_sent):
+        """Transcribe each stitched sentence ONCE, charge the errors to the
+        units that made them, regenerate only those, keep each unit's best
+        take. A take can be loud, the right length and wrong — the reference
+        clip's sentence replayed, a word dropped or swapped — and no signal
+        check sees that; the recogniser does. A failing recogniser leaves the
+        signal-checked takes in place: it may only ever improve a reading."""
+        v = self.verifier
+        stats = self.qc_stats
+        best = list(audios)
+        best_err = [float("inf")] * len(jobs)
+        sentences = [[i for i in range(len(jobs)) if owner[i] == si] for si in range(n_sent)]
+        todo = [si for si in range(n_sent) if sentences[si]]
+        for rnd in range(self.repair_rounds + 1):
+            bad = []
+            for si in todo:
+                idx = sentences[si]
+                lang = langs[si] if langs else "fa"
+                audio = self._stitch([(audios[i], jobs[i][1]) for i in idx])
+                try:
+                    total, per_unit = v.check_sentence(audio, self.sample_rate,
+                                                       [jobs[i][0] for i in idx], lang)
+                except Exception:
+                    if stats is not None:
+                        stats["asr_errors"] = stats.get("asr_errors", 0) + 1
+                    continue
+                if stats is not None:
+                    stats["checks"] = stats.get("checks", 0) + 1
+                for i, e in zip(idx, per_unit):
+                    if e < best_err[i]:
+                        best[i], best_err[i] = audios[i], e
+                if total <= getattr(v, "sentence_ok", 0.0):
+                    continue
+                bad += [i for i in idx if best_err[i] > v.threshold]
+            if not bad or rnd == self.repair_rounds:
+                break
+            if stats is not None:
+                stats["repaired"] = stats.get("repaired", 0) + len(bad)
+            fresh = rng.integers(0, 2**63, size=len(bad))
+            seed_of = dict(zip(bad, fresh))
+
+            def again(i):
                 return self._generate_with_retry(
-                    voice_cache, voice_off, jobs[i][0],
-                    rng=np.random.default_rng(int(seeds[i])))
+                    voice_cache, voice_off, jobs[i][0], attempts=2,
+                    rng=np.random.default_rng(int(seed_of[i])),
+                    lang=langs[owner[i]] if langs else "fa")
 
-            workers = min(4, os.cpu_count() or 4)
-            with ThreadPoolExecutor(max_workers=workers) as ex:
-                audios = list(ex.map(run, range(len(jobs))))
-        else:
-            audios = [self._generate_with_retry(
-                voice_cache, voice_off, jobs[0][0],
-                rng=np.random.default_rng(int(seeds[0])))]
-        segments = [(a, jobs[i][1]) for i, a in enumerate(audios)]
-        audio = self._stitch(segments)
-        if abs(pace - 1.0) >= 0.03:
-            from pedalboard import time_stretch
-
-            audio = np.ascontiguousarray(audio, dtype=np.float32)
-            audio = time_stretch(audio, self.sample_rate,
-                                 stretch_factor=pace).reshape(-1)
-        return audio.astype(np.float32)
+            for i, a in zip(bad, self._run_units(again, bad)):
+                audios[i] = a
+            todo = sorted({owner[i] for i in bad})
+        return best
 
     @staticmethod
     def _window_mean(x: np.ndarray, w: int) -> np.ndarray:
@@ -836,8 +938,18 @@ class OnnxTts:
                     if float(np.sqrt((speech[i * w:(i + 1) * w] ** 2).mean())) >= floor)
         return solid / n
 
+    #: Optional ASR self-check (scripts/verify.py AsrVerifier): after the
+    #: signal checks, every SENTENCE is transcribed once and the units it
+    #: charges with errors are regenerated (`_verify_and_repair`). None keeps
+    #: the signal-only checks — the behaviour without an ASR model.
+    verifier = None
+    #: repair rounds per request when a verifier is set
+    repair_rounds = 2
+    #: counters: units, attempts, checks, repaired, asr_errors
+    qc_stats: dict | None = None
+
     def _generate_with_retry(self, voice_cache, voice_off, chunk, attempts=3,
-                             rng=None):
+                             rng=None, lang="fa"):
         """Generate one chunk, retrying when quality is bad. `rng` lets
         parallel callers give each chunk its own independent noise stream
         (the engine's shared rng is not thread-safe). Failure modes,
@@ -861,8 +973,13 @@ class OnnxTts:
         words read short), then less dead air. Returns trimmed speech."""
         tokens = len(self.sp.encode(chunk, out_type=int))
         expected_speech = tokens / self.tps_est  # ~seconds (conservative)
+        stats = self.qc_stats
+        if stats is not None:
+            stats["units"] = stats.get("units", 0) + 1
         best, best_key = None, None
         for _ in range(attempts):
+            if stats is not None:
+                stats["attempts"] = stats.get("attempts", 0) + 1
             latents, _, _ = self._generate_chunk(voice_cache.copy(), voice_off, chunk,
                                                    rng=rng)
             audio = self._decode_all(latents)
