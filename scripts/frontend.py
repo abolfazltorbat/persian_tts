@@ -544,7 +544,7 @@ def render(engine, text: str, voice_wav: str, *, seed: int | None = None,
         return np.zeros(0, np.float32), phon
     audios = engine.synthesize_many(plans, voice_wav, pace=pace,
                                     langs=[s.lang for s in sents])
-    gap = np.zeros(int(SENTENCE_GAP / max(pace, 0.1) * engine.sample_rate), np.float32)
+    gap = engine.pause(SENTENCE_GAP / max(pace, 0.1))
     parts = []
     for a in audios:
         parts += [a, gap]

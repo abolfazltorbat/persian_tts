@@ -387,6 +387,11 @@ class OnnxTts:
         self.dec_out = [o.name for o in self.s_dec.get_outputs()]
         init = np.load(self.dir / "decode_state_init.npz")
         self.dec_init = [init[k] for k in init.files]  # npz order == s0..sN
+        # the decoder's KV cache is linear (2048 steps, 16 per latent): one
+        # generation can decode at most 128 latents = 10.24 s of audio, and a
+        # longer one dies in _decode_all with a broadcast error
+        dec_steps = min(init[k].shape[2] for k in init.files if k.endswith(".cache"))
+        self.max_latents = dec_steps // self.steps_per_latent - 1
         n_state = len(self.dec_in) - 1
         self.cache_slots = [i for i, k in enumerate(init.files) if k.endswith(".cache")]
         self.small_slots = [i for i in range(n_state) if i not in self.cache_slots]
@@ -594,6 +599,8 @@ class OnnxTts:
         returned chunks.
         """
         words = [w for w in phonemes.split() if w]
+        if self.chunker == "balanced":
+            return [c.replace("1", "") for c in self._chunk_balanced(words)]
 
         def pack(slack: int) -> list[str]:
             c = self._pack_words(words, max_tokens, slack=slack)
@@ -619,6 +626,121 @@ class OnnxTts:
             # NOT doing this: a 2-token "?ast" chunk + 1.3 s of dead air)
             chunks = pack(slack=0)
         return [c.replace("1", "") for c in chunks]
+
+    #: "greedy" fills each chunk to the budget and leaves the rest to the
+    #: next (_pack_words + _fix_boundaries); "balanced" picks every break of a
+    #: phrase at once (_chunk_balanced).
+    chunker = "greedy"
+
+    def _chunk_balanced(self, words: list[str]) -> list[str]:
+        """All of a phrase's chunk breaks chosen together (dynamic programming
+        over word boundaries), instead of greedily.
+
+        The greedy packer fills each chunk to the budget and hands the rest
+        on, so whatever is left at the end is a runt: a 49-token phrase came
+        out 14 + 14 + 19 + 2, and the 2-token «پیدا کنیم» was read alone —
+        an isolated word with its own intonation after a pause, and the model
+        is unreliable that short (two of three attempts failed QC). Chosen
+        together, the same phrase is three even chunks.
+
+        Cost = per chunk (one unit each, so a phrase is never split more than
+        it must be; extra for a runt or for using the +2 headroom) + per break
+        (the greedy rules as costs: never strand an ezafe head, never open a
+        chunk with a light verb, «را» or a conjunction, never end on a
+        dangling preposition; a joint right after a light verb or «را» is the
+        one a reader would breathe at)."""
+        n = len(words)
+        if n <= 1:
+            return [" ".join(words)] if words else []
+        clean = [w.replace("1", "") for w in words]
+        cap = CHUNK_TOKENS + CHUNK_HEADROOM
+        memo: dict[tuple[int, int], int] = {}
+
+        def ntok(i: int, j: int) -> int:
+            if (i, j) not in memo:
+                memo[(i, j)] = len(self.sp.encode(" ".join(clean[i:j]), out_type=int))
+            return memo[(i, j)]
+
+        def chunk_cost(i: int, j: int) -> float:
+            # 4 per chunk: more than any joint bonus, so a phrase that fits is
+            # never split for a "nicer" joint, but less than a bad break, so
+            # one extra chunk may buy a phrase out of «هر | کدام»
+            t, nw = ntok(i, j), j - i
+            c = 4.0
+            if nw < n:
+                if t < MIN_CHUNK_TOKENS or nw < MIN_CHUNK_WORDS:
+                    c += 8.0                # runt
+                elif t < 9:
+                    c += 1.5                # short: reads as a fragment
+            if t > CHUNK_TOKENS:
+                c += 0.75 * (t - CHUNK_TOKENS)
+            return c
+
+        def break_cost(k: int) -> float:
+            prev, nxt = words[k - 1], words[k]
+            p, q = clean[k - 1], clean[k]
+            clause_end = self._is_finite_verb(p)
+            c = 0.0
+            if prev.endswith("1") or p.endswith("ye"):
+                c += 6.0                    # ezafe head stranded («دادههای | جمع‌آوری‌شده»)
+            if self._is_light_verb(q) or q == "rA":
+                c += 6.0                    # «تشکیل | شده‌اند», «کتاب | را»
+            if p in self._FUNCTION_WORDS or p in self._DETERMINERS:
+                c += 5.0                    # dangling preposition / «هر | کدام»
+            if q in self._CONJUNCTIONS and not clause_end:
+                c += 3.0                    # «A و B»: «و» binds to its left operand
+            if nxt.endswith("1"):
+                c += 2.0                    # ezafe phrase detached from its host
+            if p.endswith("e") and q.startswith("?"):
+                # unmarked compound («qAbele | ?e?temAd») — weak: every vowel-
+                # initial word starts with «?», so this also fires on ordinary
+                # word pairs
+                c += 1.0
+            if q == "?az":
+                c += 3.0                    # «از» completes its left word: «استفاده | از»
+            elif clause_end or p == "rA":
+                c -= 2.0                    # end of a clause («…کند | که…») / of the object NP
+            elif q in self._PREPS:
+                c -= 0.5                    # start of a prepositional phrase
+            return c
+
+        INF = float("inf")
+        best = [INF] * (n + 1)
+        back = [0] * (n + 1)
+        best[0] = 0.0
+        for j in range(1, n + 1):
+            for i in range(j - 1, -1, -1):
+                if ntok(i, j) > cap and j - i > 1:
+                    break                   # longer spans only grow
+                c = best[i] + chunk_cost(i, j) + (break_cost(i) if i else 0.0)
+                if c < best[j]:
+                    best[j], back[j] = c, i
+        out, j = [], n
+        while j > 0:
+            out.append(" ".join(words[back[j]:j]))
+            j = back[j]
+        return out[::-1]
+
+    #: Determiners and quantifiers: «هر کدام», «یک سیستم», «این روش» — they
+    #: open a noun phrase and must not end a chunk without it.
+    _DETERMINERS = {"har", "yek", "?in", "?An", "hame", "hameye", "Cand", "hic", "barxi"}
+
+    _VERB_FORM = re.compile(r"^(?:mi|nemi|be|na|ne)\w{2,}(?:am|i|ad|im|id|and)$")
+
+    # Light-verb stems with their prefixes and endings — the closed set that
+    # forms compound verbs («تشکیل شده‌اند», «وجود دارد», «پیدا کنیم»). A fixed
+    # list of forms missed the perfect ones (Sodeand, kardeand).
+    _LV_FORM = re.compile(r"^(?:mi|nemi|na|ne|be)?(?:Sod|Sav|kard|kon|dAd|dAh|dAr|dASt"
+                          r"|gereft|gir|zad|yAft|yAb|bud|bAS|nemud)e?(?:am|i|ad|im|id|and|ast|an)?$")
+
+    def _is_light_verb(self, w: str) -> bool:
+        return w in self._LIGHT_VERBS or bool(self._LV_FORM.match(w))
+
+    def _is_finite_verb(self, w: str) -> bool:
+        """A clause-final verb in GE2P phonemes: a light verb, or a prefixed
+        (mi-/be-/na-) stem with a person ending — «besAzim», «mitavAnand».
+        A break after one is the clause boundary a reader breathes at."""
+        return self._is_light_verb(w) or w == "bAyad" or bool(self._VERB_FORM.match(w))
 
     def _enforce_budget(self, chunks, max_tokens):
         """_fix_boundaries moves words across boundaries without checking
@@ -1047,6 +1169,11 @@ class OnnxTts:
             return np.zeros(0, dtype=np.float32)
         levels = [float(np.sqrt((p ** 2).mean())) for p, _ in segments if len(p)]
         target = float(np.median(levels)) if levels else 0.0
+        if self.level_target and target > 1e-6:
+            # one fixed level for every request, not each request's own median:
+            # an answer is several requests played back to back, and each one
+            # matched only to itself stepped in level at every request join
+            target = self.level_target
         f = max(1, int(0.008 * self.sample_rate))
         out = []
         for p, gap in segments:
@@ -1058,7 +1185,7 @@ class OnnxTts:
                 p[:f] *= np.linspace(0.0, 1.0, f, dtype=np.float32)
                 p[-f:] *= np.linspace(1.0, 0.0, f, dtype=np.float32)
             if gap > 0:
-                out.append(np.zeros(int(gap * self.sample_rate), dtype=np.float32))
+                out.append(self.pause(gap))
             out.append(p)
         audio = np.concatenate(out)
         # peak guard: loudness matching can push peaks past full scale
@@ -1066,6 +1193,26 @@ class OnnxTts:
         if peak > 0.98:
             audio = audio * (0.98 / peak)
         return self._compress_pauses(audio)
+
+    #: Fixed speech RMS for every request (None: each request's own median).
+    level_target: float | None = None
+    #: Fill inserted pauses with a quiet noise floor instead of digital zero.
+    #: The model's own quiet sits near -59 dBFS; an inserted gap of exact
+    #: zeros drops below it, which on headphones is the sound switching off.
+    room_tone: bool = False
+    _ROOM_TONE_RMS = 0.0011
+
+    def pause(self, seconds: float):
+        """An inserted pause: silence, or room tone (see `room_tone`)."""
+        n = max(0, int(seconds * self.sample_rate))
+        if not self.room_tone or n == 0:
+            return np.zeros(n, dtype=np.float32)
+        # deterministic per length — a pause must not change the take's seed
+        r = np.random.default_rng(n)
+        x = r.standard_normal(n + 64)
+        x = np.convolve(x, np.ones(8) / 8, mode="same")[32:32 + n]   # dull, like the floor
+        x *= self._ROOM_TONE_RMS / max(float(np.sqrt((x ** 2).mean())), 1e-9)
+        return x.astype(np.float32)
 
     def _compress_pauses(self, audio, max_pause=0.38, keep=0.28, rel_floor=0.03):
         """Remaining dead-air stretches (whatever survived the retry in
@@ -1111,6 +1258,8 @@ class OnnxTts:
         words = len(chunk.split())
         frames_after_eos = (3 if words <= 4 else 1) + 2
         max_gen_len = int(np.ceil((len(tokens) / self.tps_est + self.gen_pad) * self.frame_rate))
+        # the BOS step already produced one latent; never decode past capacity
+        max_gen_len = min(max_gen_len, self.max_latents - 1)
 
         eos_step = None
         for step in range(max_gen_len):
