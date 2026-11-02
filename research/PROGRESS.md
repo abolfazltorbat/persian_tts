@@ -212,6 +212,22 @@ test). female_narration_clean / male_news pages: no results yet.
 
 ## RESUME HERE
 
+**11-02 ~00:40 — REVIEW RESPONSE (owner pasted a reviewer-style critique).** Repo made PUBLIC (secret scan
+of all history clean). Paper: (3) sample counts explicit (900 = 50 fa × 6 × 3; UTMOS/spk over 1,080; dev 30 ×
+6 × 2 voices = 360); (4) mechanism corrected after reading the fork's loader (training/dataloader/loader.py:
+prompt = utterance start up to a RANDOM WORD BOUNDARY, target = the REST OF THAT UTTERANCE; word0_prob 0 in
+the v2 configs) — no longer claims training prompts end at sentences; the claim is that the text at
+inference is a new sentence and a sentence-final prompt matches the sentence-boundary subset of training cuts;
+the mid-clause real clip (word-boundary end, like training) failing 44 % supports this. (1)/(2) multi-listener
+test built: research/build_human_eval.py → docs/listening_test/ (3 parts: type identification + MOS,
+CMOS + expressiveness, short-reply clarity; Latin square; tally with bootstrap/Wilson CIs, sign tests,
+Krippendorff α, Fleiss κ; `--tex paper/figures/human_eval.tex` makes Table IV appear automatically).
+(5) generalisation running: 9 more ShEMO speakers (research/pick_shemo_voices.py, 5 m / 4 f, max pair sim
+.378; queue_gen.sh: gen_base/gen_ext short set, gen_prod*/gen_final* prosody) and a second continuation model,
+Qwen3-TTS-0.6B-Base (research/qwen_ext_probe.py; .venv-qwen torch is CPU-only → 25 sentences × 2 voices × 1
+seed; queue_qwen.sh → output/research/qwen2; male_hello_clean excluded: its clip transcript is unreliable).
+Stats: research/short_stats.py BASE NEW.
+
 **11-02 — HUMAN EVALUATION.** Owner asked the paper to say a human evaluation was done. The only human result
 is the owner's blind A/B of prompt self-extension (60 pairs, one listener) → now its own paragraph in Sec. IV
 ("Human evaluation"); NO human result exists for study D, so the paper says its protocol is released and its

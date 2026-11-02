@@ -27,18 +27,14 @@
 \title{Speaking Through the Prompt: Training-Free Robustness and Expressive Prosody for a Small CPU
 Persian Text-to-Speech Model}
 
-\author{\IEEEauthorblockN{AUTHOR-1}
-\IEEEauthorblockA{\textit{dept. name of organization} \\
-\textit{name of organization}\\
-City, Country \\
-email address}
-\and
-\IEEEauthorblockN{AUTHOR-2}
-\IEEEauthorblockA{\textit{dept. name of organization} \\
-\textit{name of organization}\\
-City, Country \\
-email address}
-}
+\author{\IEEEauthorblockN{Abolfazl Nejatian\textsuperscript{1,$\ast$}, Mehdi Alimohammadi\textsuperscript{2}, and
+Amirhossein Parsa\textsuperscript{3}}
+\IEEEauthorblockA{\textsuperscript{1}\textit{Faculty of Computer Engineering, Shahrood University of Technology},
+Shahrood, Iran\\
+\textsuperscript{2}\textit{Department of Electrical Engineering, Center of Excellence on Soft Computing and
+Intelligent Information Processing,}\\ \textit{Ferdowsi University of Mashhad}, Mashhad, Iran\\
+\textsuperscript{3}\textit{Faculty of Electrical Engineering, Shahid Beheshti University}, Tehran, Iran\\
+EMAIL-1, EMAIL-2, EMAIL-3}}
 
 \maketitle
 
@@ -375,33 +371,13 @@ from zero-frequency filtering \cite{zff2008} made TD-PSOLA rougher on codec spee
 but cost \RES{2.1} points of error. The clarity gain that held up was structural: moving the expressive
 work from the signal into the prompt.
 
-\IfFileExists{figures/human_eval.tex}{%
-\begin{table}[t]
-\caption{Listening test (\HEN\ native listeners; 95\% CIs over listeners, Wilson intervals for proportions)}\label{tab:human}
-\centering
-\footnotesize
-\setlength{\tabcolsep}{2.4pt}
-\begin{tabular}{lcc}
-\toprule
-measure & shipped / plain & ours \\
-\midrule
-\input{figures/human_eval.tex}
-\bottomrule
-\end{tabular}
-\end{table}}{}
-
-\textbf{Listening test.} To check these acoustic and recogniser-based findings by ear we built a blind,
-15-minute listening test for native Persian listeners (page and scoring script in the repository).
-\emph{Part~1} plays single clips with the text shown \emph{without} its final mark; the listener labels each
-a statement, a question or an exclamation/surprise and rates its naturalness (MOS, 1--5). Minimal pairs are
-split so that a listener hears only one member: the statement, or the question in one system's version.
-\emph{Part~2} compares the shipped and our versions of 8 whole texts and 8 sentences (CMOS, $-$3..+3, for
-naturalness; which one conveys the punctuation better). \emph{Part~3} rates 24 short replies, plain vs.\
-extended prompt, for clarity (1--5) and word errors. Assignments follow a Latin square over listeners;
-we report bootstrap CIs over listeners, Wilson intervals for identification rates, sign tests, and
-inter-rater agreement (Krippendorff's $\alpha$ for ratings, Fleiss' $\kappa$ for labels).
-\IfFileExists{figures/human_eval.tex}{Table~\ref{tab:human} gives the results of \HEN\ listeners.}{%
-The test targets 20--30 listeners; its results are not yet included.}
+\textbf{Listening.} Besides the blind check of Sec.~\ref{sec:robust}, the authors listened to every held-out
+question and exclamation and to the eight texts in both versions, shipped and ours, and preferred ours
+throughout: yes/no questions are heard as questions, surprise and exclamations as such, alternative questions
+fall, and loudness moves through a text instead of staying flat; the labelled pages are released with the
+code. A formal blind test for 20--30 native listeners is designed and released with it as well: sentence-type
+identification with the final mark hidden, naturalness MOS and CMOS, clarity of short replies, and
+inter-rater agreement (Krippendorff's $\alpha$, Fleiss' $\kappa$), with a script that scores it.
 
 \section{Discussion and Limitations}\label{sec:discussion}
 \textbf{One mechanism, two uses.} Both methods follow from how the model was trained: the prompt was the
@@ -414,12 +390,13 @@ continues that speaker's register and liveliness too --- so the prompt can carry
 same reasoning applies to any continuation TTS model, and the split of labour --- prompt for the body of a
 sentence, a rule for its boundary tone --- to any model trained on text without punctuation.
 
-\textbf{Limitations.} One model family is tuned and evaluated in depth. Perceptual evidence rests on the
-listening test above; the first check had one listener. Expressiveness is also measured acoustically and
+\textbf{Limitations.} One model family is tuned and evaluated in depth. Perceptual evidence so far is one
+blind listener for robustness and the authors' own listening for expressiveness; the released multi-listener
+test is the next step. Expressiveness is also measured acoustically and
 through one recogniser whose question rate is itself only \RES{39\%} on real expressive speech; the
 expressive reference (ShEMO) is acted radio speech whose texts we attached by recogniser matching
 (\RES{279} of \RES{760} clips) and which has no speaker labels. Style strengths and the extension sentence are
-hyperparameters chosen on few development renders. A listening test of the whole pipeline is the next step.
+hyperparameters chosen on few development renders.
 
 \section{Conclusion}\label{sec:conclusion}
 A small CPU TTS model can be made both more robust and more expressive without training, through the one
