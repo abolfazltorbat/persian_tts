@@ -257,6 +257,13 @@ The cost is speaker similarity on one voice (female, \RES{$-$0.03}); choosing th
 similarity removes it (\RES{+0.009} pooled) at part of the intelligibility gain. English sentences, read
 through mapped Persian phonemes, keep the plain clip.
 
+\textbf{Human evaluation.} A native Persian listener compared plain and extended prompts blind: \RES{60} pairs of
+held-out short sentences in the default voice, same seed, left/right at random, choosing the better reading
+or ``same'' and marking any word error. Preference did not differ (same \RES{33}, plain \RES{15}, extended
+\RES{12}; sign test $p=\RES{.70}$); word errors were marked in \RES{7} plain and \RES{5} extended renders
+(\RES{3} vs.\ \RES{1} on Persian-only sentences). None of the \RES{12} takes the listener marked was among the
+\RES{9} the recognisers failed: errors on such short sentences are rare and idiosyncratic, so the recogniser-measured gain needs a larger listening test to be confirmed by ear.
+
 \section{Expressiveness: What the Prompt Carries}\label{sec:expr}
 \textbf{Diagnosis.} Because the model never sees a mark, a yes/no question and its statement twin are the
 same audio sample for sample (final-pitch difference \RES{0.00}\,st; \RES{4.75}\,st in real speech). What the
@@ -368,10 +375,10 @@ continues that speaker's register and liveliness too --- so the prompt can carry
 same reasoning applies to any continuation TTS model, and the split of labour --- prompt for the body of a
 sentence, a rule for its boundary tone --- to any model trained on text without punctuation.
 
-\textbf{Limitations.} One model and five voice clips (three of one speaker). Intelligibility is
-recogniser-measured; a first blind A/B test by one listener (60 pairs, default voice) heard no preference
-between plain and extended prompts (same \RES{33}, plain \RES{15}, extended \RES{12}; $p=\RES{.70}$), and its
-error marks fell on other takes than the recognisers' failures. Expressiveness is measured acoustically and
+\textbf{Limitations.} One model and five voice clips (three of one speaker). The human evaluation of
+robustness has one listener and 60 pairs; that of expressiveness is a blind A/B protocol (51 pairs of whole
+texts and held-out sentences, two questions per pair) released with the code, whose results are not part of
+this paper. Expressiveness is therefore measured acoustically and
 through one recogniser whose question rate is itself only \RES{39\%} on real expressive speech; the
 expressive reference (ShEMO) is acted radio speech whose texts we attached by recogniser matching
 (\RES{279} of \RES{760} clips) and which has no speaker labels. Style strengths and the extension sentence are
