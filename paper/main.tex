@@ -262,6 +262,16 @@ The cost is speaker similarity on one voice (female, \RES{$-$0.03}); choosing th
 similarity removes it (\RES{+0.009} pooled) at part of the intelligibility gain. English sentences, read
 through mapped Persian phonemes, keep the plain clip.
 
+\textbf{A second model.} Qwen3-TTS-0.6B-Base \cite{qwen3tts2026} also clones a voice by continuation, from the
+reference audio \emph{and} its transcript, over discrete 12\,Hz codec tokens. We built its extension the same
+way (median of four readings of the same sentence, appended with its transcript) and rendered 25 held-out
+short sentences $\times$ 2 voices. Persian is not a supported language of Qwen3-TTS and its error is about
+ten times higher than our engine's; failed renders went from \RES{12} to \RES{10} of \RES{50} (error change
+\RES{+1.4} points, CI \RES{[$-$7.1, +9.9]}, no measurable effect) while UTMOS rose by \RES{0.26} for both
+voices (\RES{+0.16}, \RES{+0.36}) at unchanged speaker similarity (\RES{$-$0.006}). Both of those clips already
+end at a finished sentence, so the mechanism predicts no intelligibility gain there --- as for our 5.1\,s
+clip --- while the naturalness gain carries over to a different architecture.
+
 \textbf{A first listening check.} A native Persian listener compared plain and extended prompts blind: \RES{60} pairs of
 held-out short sentences in the default voice, same seed, left/right at random, choosing the better reading
 or ``same'' and marking any word error. Preference did not differ (same \RES{33}, plain \RES{15}, extended
@@ -387,7 +397,7 @@ mid-phrase asks the model to finish something it was not given the words for, an
 truncated or replaced by a replay of the prompt. How often training cuts fell at sentence boundaries we could
 not measure, because the training manifests are not public. And because the model learned to continue a speaker, it
 continues that speaker's register and liveliness too --- so the prompt can carry delivery the text cannot. The
-same reasoning applies to any continuation TTS model, and the split of labour --- prompt for the body of a
+same reasoning applies to any continuation TTS model (the naturalness gain held on Qwen3-TTS), and the split of labour --- prompt for the body of a
 sentence, a rule for its boundary tone --- to any model trained on text without punctuation.
 
 \textbf{Limitations.} One model family is tuned and evaluated in depth. Perceptual evidence so far is one
