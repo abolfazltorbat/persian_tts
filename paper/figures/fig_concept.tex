@@ -1,0 +1,55 @@
+% Fig. 1 — the idea: the voice prompt is the control surface of a continuation TTS model
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[x=1cm,y=1cm,font=\footnotesize,
+  box/.style={draw=black!55,rounded corners=2pt,fill=black!3,align=center,minimum height=1.05cm,inner sep=2.5pt},
+  ours/.style={box,draw=orange!80!black,fill=orange!12,line width=0.8pt},
+  lost/.style={box,draw=red!60!black,fill=red!6},
+  arr/.style={-{Stealth[length=2mm]},draw=black!70,line width=0.6pt},
+  oarr/.style={-{Stealth[length=2mm]},draw=orange!80!black,line width=0.9pt},
+  seg/.style={draw=black!55,minimum height=0.5cm,inner sep=1.5pt,font=\scriptsize,anchor=west},
+  lane/.style={font=\footnotesize\bfseries,text=black!55,anchor=west},
+  note/.style={font=\scriptsize,text=black!70},
+  tag/.style={font=\scriptsize\bfseries,text=orange!70!black}]
+% ── lane 1: the text path ─────────────────────────────────────────────────
+\node[lane] at (-0.05,1.35) {TEXT PATH};
+\node[box,minimum width=2.3cm] (txt) at (1.15,0) {written text\\[1pt]\fa{امشب به سینما می‌رویم؟}};
+\node[box,minimum width=2.45cm] (fe) at (4.05,0) {front end\\sentences, phrases,\\\textbf{sentence type}};
+\node[lost,minimum width=2.35cm] (g2p) at (6.95,0) {G2P $\rightarrow$ phonemes\\\textbf{punctuation lost}\\\fa{؟}\;=\;\fa{.}};
+\node[box,minimum width=2.6cm] (lm) at (10.0,0) {flow LM (110M)\\+ Mimi decoder\\continues its prompt};
+\node[ours,minimum width=2.75cm] (rule) at (13.15,0) {\textbf{ending rule}\\final rise / no fall,\\energy, loudness plan};
+\node[box,minimum width=1.35cm] (out) at (15.65,0) {speech};
+\draw[arr] (txt) -- (fe);
+\draw[arr] (fe) -- (g2p);
+\draw[arr] (g2p) -- (lm);
+\draw[arr] (lm) -- (rule);
+\draw[arr] (rule) -- (out);
+\draw[oarr,dashed] (fe.north) -- ++(0,0.5) -| node[pos=0.25,above,note]{the sentence type travels around the model, which never sees it} (rule.north);
+\node[tag,anchor=south east] at ([yshift=0.05cm]rule.north east) {Sec.~\ref{sec:expr}};
+% ── lane 2: the prompt path ───────────────────────────────────────────────
+\node[lane] at (-0.05,-1.85) {PROMPT PATH (the control surface)};
+\node[box,minimum width=2.3cm,minimum height=0.95cm] (clip) at (1.15,-2.75) {reference clip\\$\le$5\,s, cut tight};
+\node[seg,fill=black!10,minimum width=0.95cm] (c1) at (2.85,-2.35) {clip};
+\node[seg,fill=orange!20,minimum width=3.5cm] (e1) at (3.8,-2.35) {own reading of a neutral sentence\,.};
+\node[seg,fill=black!10,minimum width=0.95cm] (c2) at (2.85,-3.15) {clip};
+\node[seg,fill=orange!45,minimum width=3.5cm] (e2) at (3.8,-3.15) {same reading +4\,st, $\times$1.6, +4\,dB};
+\draw[arr] ([yshift=0.2cm]clip.east) -- (c1.west);
+\draw[arr] ([yshift=-0.2cm]clip.east) -- (c2.west);
+\node[note,anchor=north west] at (2.85,-3.5) {built once per voice: \textbf{neutral} (C1, Sec.~\ref{sec:robust}), \textbf{lively} (C2, Sec.~\ref{sec:expr})};
+\node[ours,minimum width=2.6cm,minimum height=0.95cm] (sel) at (10.0,-2.75) {\textbf{pick the prompt}\\by sentence type};
+\draw[oarr] (e1.east) -- ([yshift=0.18cm]sel.west);
+\draw[oarr] (e2.east) -- ([yshift=-0.18cm]sel.west);
+\draw[oarr] (sel.north) -- node[right,note]{voice prompt} (lm.south);
+\draw[oarr,dashed] ([xshift=0.6cm]fe.south) |- (8.9,-1.45) -- ([xshift=-0.9cm]sel.north);
+\node[note,anchor=south] at (6.9,-1.45) {exclamation or surprised question $\rightarrow$ lively, else neutral};
+% ── challenges ────────────────────────────────────────────────────────────
+\node[draw=black!30,rounded corners=2pt,fill=black!2,align=left,anchor=north west,inner sep=4pt,font=\scriptsize]
+  at (11.75,-1.75) {%
+\textcolor{red!55!black}{\textbf{C1}} short replies lose their endings when\\
+\hphantom{\textbf{C1} }the prompt stops mid-utterance\\
+\hphantom{\textbf{C1} }$\rightarrow$ \textbf{end the prompt at a finished sentence}\\[2pt]
+\textcolor{red!55!black}{\textbf{C2}} the model cannot hear \fa{؟}\,/\,\fa{!}\\
+\hphantom{\textbf{C2} }$\rightarrow$ \textbf{lively prompt} for the body,\\
+\hphantom{\textbf{C2} }\phantom{$\rightarrow$} \textbf{rule} only for the ending\\[2pt]
+\textcolor{black!60}{\textbf{M}\, two recognisers in consensus; a recogniser}\\
+\textcolor{black!60}{\hphantom{\textbf{M}\, }as listener; real read + expressive speech}};
+\end{tikzpicture}}

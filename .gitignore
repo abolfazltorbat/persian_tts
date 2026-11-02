@@ -1,6 +1,8 @@
 # ONNX model package (469 MB) — download it, see README:
 #   hf download Nimaone/pocket-tts-farsi-v2-onnx --local-dir model/onnx
 model/onnx/
+# prompt self-extensions built on first use (derived, see scripts/tts_onnx.py _ext_file)
+model/voice_ext/
 
 # Generated audio
 output/

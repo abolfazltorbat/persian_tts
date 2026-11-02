@@ -28,7 +28,7 @@ _ARPA = {
     "R": "r", "S": "s", "SH": "S", "T": "t", "TH": "t", "V": "v", "W": "v",
     "Y": "y", "Z": "z", "ZH": ";",
 }
-# spoken letter names, Persian convention (GPU -> jipiyu)
+# spoken letter names, Persian convention (GPU -> ji pi yu)
 _LETTERS = {
     "a": "?ey", "b": "bi", "c": "si", "d": "di", "e": "?i", "f": "?ef",
     "g": "ji", "h": "?eyC", "i": "?Ay", "j": "jey", "k": "key", "l": "?el",
@@ -60,6 +60,12 @@ _OVERRIDE = {
     "css": "si ?es ?es", "url": "yu ?Ar ?el", "pdf": "pi di ?ef",
     "gpu": "ji pi yu", "cpu": "si pi yu", "ram": "ram", "usb": "yu ?es bi",
     "sms": "?es ?em ?es",
+    # acronyms said as words, not spelled (ناسا، ناتو، اوپک، کووید، یونسکو)
+    "nasa": "nAsA", "nato": "nAto", "opec": "?opek", "covid": "kovid",
+    "unesco": "yunesko", "unicef": "yunisef",
+    # the article in its strong form. CMUdict's schwa came out as a lone
+    # «?e», which Whisper heard as "the" in 3 of 3 takes ("with the chance")
+    "a": "?ey",
 }
 _VOWELS = set("aAeiou")
 _WORD = re.compile(r"[A-Za-z][A-Za-z']*")
@@ -169,6 +175,14 @@ def _oov(lw: str):
     return None
 
 
+def spell(letters: str) -> str:
+    """An acronym letter by letter, one word per letter: LLM -> «?el ?el ?em»,
+    as a Persian speaker says «ال ال ام». Glued into one word («?el?el?em») the
+    tokenizer cuts it on a mid-word «?» the model seldom saw, and LLM came out
+    as «عللم» / «LNM»."""
+    return " ".join(_LETTERS[c] for c in letters.lower())
+
+
 def word(w):
     """One English word -> phonemes, or None if it cannot be resolved
     (caller should then fall back to the engine's own transliteration)."""
@@ -176,7 +190,12 @@ def word(w):
     if lw in _OVERRIDE:
         return _OVERRIDE[lw]
     if w.isupper() and 2 <= len(w) <= 5 and w.isalpha():
-        return "".join(_LETTERS[c] for c in lw)         # GPT -> jipiti
+        return spell(w)                                   # GPT -> ji pi ti
+    if len(w) >= 3 and w.endswith("s") and w[:-1].isupper() and w[:-1].isalpha():
+        # a plural acronym (LLMs, APIs, GPUs): the -s goes on the last letter
+        base = _OVERRIDE.get(lw[:-1]) or (spell(w[:-1]) if len(w) <= 6 else None)
+        if base:
+            return base + ("iz" if base[-1] in "szSC;j" else _voiced_ending("s", "s", base))
     s = _dict_ph(lw)
     if not s:
         s = _oov(lw)

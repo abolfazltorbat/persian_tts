@@ -39,6 +39,22 @@ Web demo: `./env/Scripts/python.exe scripts/server.py` → http://127.0.0.1:8770
 - 🎧 **Audio sample (no install needed):** [Online demo](https://nimaone-persian-tts-onnx.static.hf.space) — listen to three built-in voices online.
 - 📦 **Ready ONNX package:** [`Nimaone/pocket-tts-farsi-v2-onnx`](https://huggingface.co/Nimaone/pocket-tts-farsi-v2-onnx) — no need for torch or building the package; download and run directly.
 
+## Research: speaking through the prompt (paper)
+
+`paper/main.pdf` — *Speaking Through the Prompt: Training-Free Robustness and Expressive Prosody for a
+Small CPU Persian Text-to-Speech Model*. Everything is inference-time; all switches default OFF so the
+engine's research baseline stays reproducible:
+
+| engine switch (`scripts/tts_onnx.py`) | effect |
+|---|---|
+| `prompt_ext_dir`, `prompt_ext_en=False` | **prompt self-extension**: the voice prompt ends at the model's own finished sentence — failed short renders halve, a clip cut mid-clause 44 % → 3 % error |
+| `max_attempts=1` | one take per unit (with the extension it beats the 3-take retry loop at half the work) |
+| `intonation=1.0` | sentence-type prosody (`scripts/intonation.py`): final rise of yes/no questions, wh-/exclamation endings, energy, loudness plan |
+| `prompt_styles=intonation.PROMPT_STYLES` | **prompt styling**: exclamations / surprised questions generated from a livelier copy of the prompt |
+| `level_target=0.16`, `limiter_ceiling=0.95` | louder output with a look-ahead peak limiter |
+
+Ledger of every experiment: `research/PROGRESS.md`; scripts and sentence sets: `research/`.
+
 ## ONNX Runtime vs PyTorch Path Comparison
 
 Both paths run the **same model** (identical weights from pocket-tts-farsi-v2); they differ in runtime environment, install size, and portability. The ONNX path is the result of an export project whose goal was "runs on any system, no GPU, no internet."
@@ -324,10 +340,10 @@ curl -X POST localhost:8770/api/tts-phonemes \
 
 Since the model is stochastic and sometimes produces corrupted output, the ONNX engine has notable quality control layers (details and numbers in `docs/`):
 
-- **Punctuation-aware phrase planning** — comma 0.16s (short breath), period/dash 0.26s (real pause), sentence end 0.45s; short phrases and light initial verbs are merged so no word is dropped.
-- **Chunk packing on word boundaries** — budget of ~18 tokens; boundary correction for ezafe, conjunction, light verbs, and extra letters; one-to-two token chunks that sound bad are merged.
+- **Punctuation-aware phrase planning** — pauses as heard: comma 0.24 s (short breath), colon/semicolon/dash 0.34 s (real pause), sentence end 0.53 s, paragraph end (blank line) 0.88 s; each chunk keeps 0.2 s of its own decay so word endings are not clipped. Short phrases and light initial verbs are merged so no word is dropped.
+- **Chunk packing on word boundaries** — a phrase is one generation up to 30 tokens (+4 for a bound pair; pure-English sentences 18): most sentences are read in one breath. Longer phrases are split where a reader would breathe (after a verb or «rA», before a preposition; an ezafe pair is kept together), with all breaks of a phrase chosen together so no chunk is a runt. Mid-clause joins on `eval/fluency.py`: 99 → 12, same CER.
 - **Parallel generation** of independent chunks (up to 4 workers) + reference voice cache (LRU, 4 entries).
-- **Loudness matching** of sections to mean + peak guard + short fade for seamless output.
+- **Loudness matching** of sections to one fixed level (the same for every request, so consecutive requests do not step in loudness) + peak guard + short fade; inserted pauses carry a quiet room tone instead of digital silence.
 - **Compression of extra silences** the model produces between sentences.
 - **Validation**: ONNX output waveform vs torch with same noise differs by 7.5e-4 (inaudible) and same speed (RTF ~0.88×; details in `scripts/test_tts_onnx.py`).
 

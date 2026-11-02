@@ -1,0 +1,61 @@
+# id	lang	cat	text   — TEST set of short utterances (1-5 words); never used for tuning
+t_s01	fa	short	سلام.
+t_s02	fa	short	خداحافظ.
+t_s03	fa	short	ممنون از شما.
+t_s04	fa	short	بله، حتماً.
+t_s05	fa	short	نه، اصلاً.
+t_s06	fa	short	کی برمی‌گردی؟
+t_s07	fa	short	همین‌جا بمان.
+t_s08	fa	short	خیلی خوب است.
+t_s09	fa	short	دوباره بگو.
+t_s10	fa	short	چه ساعتی؟
+t_s11	fa	short	زود باش!
+t_s12	fa	short	مشکلی نیست.
+t_s13	fa	short	کمک لازم داری؟
+t_s14	fa	short	در را ببند.
+t_s15	fa	short	پیام را خواندم.
+t_s16	fa	short	تقریباً تمام شد.
+t_s17	fa	short	کجا رفتی؟
+t_s18	fa	short	منتظرت هستم.
+t_s19	fa	short	قبول دارم.
+t_s20	fa	short	آفرین!
+t_s21	fa	short	به سلامت.
+t_s22	fa	short	چند سالته؟
+t_s23	fa	short	نوبت توست.
+t_s24	fa	short	چراغ را خاموش کن.
+t_s25	fa	short	هوا سرد است.
+t_s26	fa	short	غذا آماده است.
+t_s27	fa	short	گوش کن.
+t_s28	fa	short	خیالت راحت.
+t_s29	fa	short	باور نمی‌کنم!
+t_s30	fa	short	بعداً صحبت می‌کنیم.
+t_s31	fa	short	ببخشید، دیر شد.
+t_s32	fa	short	اشکالی ندارد.
+t_s33	fa	short	تولدت مبارک!
+t_s34	fa	short	کار خوبی کردی.
+t_s35	fa	short	راست می‌گویی؟
+t_s36	fa	short	سفر بخیر.
+t_s37	fa	short	ماشین خراب شد.
+t_s38	fa	short	بیا اینجا.
+t_s39	fa	short	چه کسی آمد؟
+t_s40	fa	short	ساعت ده.
+t_s41	fa	short	دو تا چای.
+t_s42	fa	short	نامه رسید.
+t_s43	fa	short	خیلی ممنونم.
+t_s44	fa	short	برق رفت.
+t_s45	fa	short	درس تمام شد.
+t_s46	fa	short	دقت کن!
+t_s47	fa	short	دستت درد نکند.
+t_s48	fa	short	چه بارانی!
+t_s49	fa	short	عجله نکن.
+t_s50	fa	short	فکر خوبی است.
+t_e01	en	short	Hello.
+t_e02	en	short	Thank you.
+t_e03	en	short	See you soon.
+t_e04	en	short	Good morning.
+t_e05	en	short	Not yet.
+t_m01	mix	short	ایمیل را چک کن.
+t_m02	mix	short	Wi-Fi وصل نیست.
+t_m03	mix	short	لینک را بفرست.
+t_m04	mix	short	OK، قبول.
+t_m05	mix	short	روی Save بزن.

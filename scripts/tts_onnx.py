@@ -10,14 +10,24 @@
 # CLI:
 #   python scripts/tts_onnx.py "salAm hAle SomA Cetor ?ast" voices/male_hello.wav out.wav
 import argparse
+import hashlib
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
+
+
+def _sibling(name: str):
+    """A sibling module, imported the same way here and in the vendored copy."""
+    import importlib
+    if __package__:
+        return importlib.import_module("." + name, __package__)
+    return importlib.import_module(name)
 import sentencepiece as spm
 
 BASE = Path(__file__).resolve().parent.parent
@@ -66,31 +76,44 @@ _STRONG_LEADIN = (":", "؛", "—", "–")
 # pause lengths shared by the plan/pack layers (seconds): a strong lead-in
 # (colon/semicolon/dash) gets a real stop, a comma a short breath; the
 # sentence pause is inserted by the caller — server and CLI both read
-# SENTENCE_GAP so the two paths cannot drift apart
-_STRONG_GAP = 0.26
-_PHRASE_GAP = 0.16
-SENTENCE_GAP = 0.45
-# gap at a fresh-chunk boundary inside one sentence (an unrelated knob from
-# the _compress_pauses keep=0.12, which shortens leftover dead air)
-_CHUNK_GAP = 0.12
+# SENTENCE_GAP so the two paths cannot drift apart. These are what is
+# INSERTED; every chunk already ends with OnnxTts.tail_keep (0.20 s) of its own
+# decay and quiet, so a listener hears comma 0.24 s, colon 0.34 s, sentence
+# 0.53 s, paragraph 0.88 s — the lengths of the 60 ms-tail design, kept when
+# the tail grew (2026-10-24).
+_STRONG_GAP = 0.12
+_PHRASE_GAP = 0.02
+SENTENCE_GAP = 0.31
+# after the last sentence of a paragraph (a blank line in the text): readers
+# stop longer between paragraphs than between sentences, and without it an
+# answer's structure — intro, list, conclusion — ran together at one rhythm
+PARAGRAPH_GAP = 0.66
+# gap at a fresh-chunk boundary inside one sentence: none beyond the chunk's
+# own tail (an unrelated knob from the _compress_pauses keep=0.12, which
+# shortens leftover dead air)
+_CHUNK_GAP = 0.0
 
 # ---- chunking token budget: single source for the measured model limits ----
-# the model trains on ~11-token utterances; CHUNK_TOKENS is the safe budget
-# and budget+CHUNK_HEADROOM still terminates (21+ tokens do not) — the
-# bound-pair rule and _enforce_budget accept up to budget+headroom even when
-# the fill slack is 0. TAIL_MERGE_CAP is deliberately NOT the hard cap: the
-# runt-tail merge may only reach 19 (its own, smaller measured bound).
-CHUNK_TOKENS = 18
-CHUNK_HEADROOM = 2
-TAIL_MERGE_CAP = 19
+# One generation is one breath. Every chunk boundary is a pause, a pitch reset
+# and an utterance-final fall in the middle of a sentence — the "reading a
+# list" sound. The old budget (18 tokens; "21+ stop terminating") was measured
+# with the defective male_hello prompt. Re-measured 2026-10-23 on three clean
+# voices, whole sentences as ONE generation, Whisper-scored: 10–39 tokens end
+# on EOS 100 % of the time at CER 4.7–7.7 %, no worse than short chunks. The
+# real ceiling is the decoder (max_latents: 10.24 s of audio), reached ~40+.
+# So a chunk is <= 30 tokens (+4 for a bound pair): most sentences are one
+# generation, and mid-clause joins on eval/fluency.py fell 99 -> 12.
+CHUNK_TOKENS = 30
+CHUNK_HEADROOM = 4
+# Pure-English sentences keep the short budget. They are read through mapped
+# phonemes the model never trained on, and long runs of those went CER
+# 4.9 -> 7.6 % while Persian went 6.8 -> 6.3 % and mixed 10.3 -> 9.8 %.
+EN_CHUNK_TOKENS = 18
+EN_CHUNK_HEADROOM = 2
 # minimum viable chunk — below this the model reads badly ("har taklif rA"
 # came out as garbage on whole voices)
 MIN_CHUNK_WORDS = 3
 MIN_CHUNK_TOKENS = 6
-RUNT_TAIL_TOKENS = 2
-# best-joint lookback depth on a forced break (words scanned backwards)
-LOOKBACK_LIGHTVERB = 5   # light verb / "rA" joints
-LOOKBACK_PREP = 3        # stranded-preposition joints
 
 
 def _letter_words(tp: str) -> list[str]:
@@ -338,7 +361,7 @@ def trim_hot_onset(audio: np.ndarray, sr: int, head_ms: int = 300,
 
 class OnnxTts:
     # voice-prompt KV cache budget: ~19 MB per entry -> ~76 MB held
-    VOICE_MEMO_MAX = 4
+    VOICE_MEMO_MAX = 8
 
     def __init__(self, pkg_dir=PKG, seed=None):
         # seed=None draws OS entropy: every run differs, so the README's
@@ -355,6 +378,7 @@ class OnnxTts:
         self.tps_est = c["tokens_per_second_estimate"]
         self.gen_pad = c["gen_seconds_padding"]
         self.frame_rate = c["frame_rate"]
+        self.frame_samples = int(round(self.sample_rate / self.frame_rate))  # 1920
 
         w = np.load(self.dir / "weights.npz")
         self.lut = w["lut_weight"]
@@ -367,8 +391,12 @@ class OnnxTts:
         # voice prompt KV caches, memoised by (path, mtime): encoding a
         # reference voice costs ~0.5 s and synthesis runs per SENTENCE —
         # a 6-sentence paragraph paid it 6 times. Entries are ~19 MB each,
-        # so VOICE_MEMO_MAX caps the cache at ~76 MB (LRU).
+        # so VOICE_MEMO_MAX caps the cache at ~150 MB (LRU; a voice can hold
+        # three: extended, plain for English, and one prosody-styled prompt).
         self._voice_memo: dict = {}
+        self._voice_raw: dict = {}      # id(voice cache) -> raw prompt latents
+        self._carrier_memo: dict = {}   # id(voice cache) -> (carrier tokens, latents)
+        self._ext_lock = threading.Lock()  # prompt extensions are built once per voice
         opts = ort.SessionOptions()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         # chunks generate in parallel (4 workers); the models are small and
@@ -405,7 +433,7 @@ class OnnxTts:
             raise RuntimeError(
                 f"flow cache overflow: offset {offset} + {S} new tokens exceeds "
                 f"capacity {self.CAP} — the text chunk is too long for one "
-                f"generation pass (max ~18 phoneme tokens per chunk)")
+                f"generation pass (max {CHUNK_TOKENS + CHUNK_HEADROOM} phoneme tokens per chunk)")
         lat, eos, kv = self.s_flow.run(None, {
             "sequence": seq, "text_emb": text_emb,
             "offset": np.array(offset, dtype=np.int64),
@@ -418,16 +446,25 @@ class OnnxTts:
         cache[:, :, offset : offset + S] = kv
         return lat, eos, cache, offset + S
 
-    def voice_cache(self, wav_path):
+    def voice_cache(self, wav_path, extend: bool = True, style: str | None = None):
         """Voice prompt -> seeded flow KV cache. Pure ONNX + numpy.
         Memoised by (path, mtime): the returned cache is SHARED and must
         never be written to — callers copy it before generating (they do:
-        _generate_with_retry copies per attempt)."""
+        _generate_with_retry copies per attempt). `extend=False` gives the
+        plain clip even when prompt self-extension is on (English sentences,
+        and building the extension itself) — without touching shared state,
+        so concurrent requests on one engine cannot see each other's mode.
+        `style` names an entry of `prompt_styles`: the extension is re-styled
+        (register / range / level) before it conditions the model."""
         import soundfile as sf
         from scipy.signal import resample_poly
 
         p = Path(wav_path)
-        key = (str(p.resolve()), p.stat().st_mtime)
+        style = style if (extend and style and self.prompt_ext_dir and self.prompt_styles
+                          and style in self.prompt_styles) else None
+        key = (str(p.resolve()), p.stat().st_mtime, self.prompt_ext_dir if extend else None,
+               self.prompt_ext_order, self.prompt_ext_min_s,
+               (style, tuple(self.prompt_styles[style])) if style else None)
         hit = self._voice_memo.pop(key, None)
         if hit is not None:
             self._voice_memo[key] = hit  # refresh recency
@@ -451,6 +488,8 @@ class OnnxTts:
                   f"first word of every chunk")
 
         lat = self.s_enc.run(None, {"audio": audio[None, None, :]})[0]  # [1,T,ldim]
+        if extend:
+            lat = self._extend_prompt(p, lat, style)
         cond = (lat[0] @ self.spk_proj.T).astype(np.float32)            # [T,dim]
         text_emb = np.concatenate([self.bos_voice, cond])[None]         # [1,T+1,dim]
 
@@ -459,8 +498,178 @@ class OnnxTts:
             np.zeros((1, 0, self.ldim), np.float32), text_emb, 0,
             np.zeros((1, self.ldim), np.float32), cache)
         self._voice_memo[key] = (cache, off)
+        # the prompt's raw latents, for continuation priming (prompt = clip + tail)
+        self._voice_raw[id(cache)] = lat[0].astype(np.float32)
         while len(self._voice_memo) > self.VOICE_MEMO_MAX:
-            self._voice_memo.pop(next(iter(self._voice_memo)))
+            old, _ = self._voice_memo.pop(next(iter(self._voice_memo)))
+            self._voice_raw.pop(id(old), None)
+            self._carrier_memo.pop(id(old), None)
+        return cache, off
+
+    #: Prompt self-extension (research/README.md, study B; None = off): a
+    #: directory of `<voice stem>.ext.npy` files — RAW latents of the model's
+    #: own reading of a neutral sentence in that voice (research/prep_voice_ext.py).
+    #: The prompt becomes clip + extension, cut to the trained 5 s window.
+    prompt_ext_dir: str | None = None
+    #: "ref+ext" (clip first) or "ext+ref" (clip last, next to the take)
+    prompt_ext_order: str = "ref+ext"
+    #: apply the (Persian) extension to English sentences too
+    prompt_ext_en: bool = True
+    #: seconds of extension guaranteed even for a long clip (its start is cut)
+    prompt_ext_min_s: float = 0.0
+
+    #: Prosody-styled prompts (research/PROGRESS.md, study D; None = off):
+    #: name -> (register st, range scale, level dB). The voice prompt carries
+    #: register, pitch range and level into the take — a re-styled extension
+    #: (decoded, TD-PSOLA, re-encoded; the OUTPUT is never processed) makes the
+    #: model itself speak higher and livelier. frontend.render picks a style
+    #: per sentence from its written type (intonation.STYLE_OF_KIND).
+    prompt_styles: dict | None = None
+    #: a high voice (extension median F0 above this) gets only this share of a
+    #: style's register shift: +4 st on the female voice cost 0.4 UTMOS on
+    #: exclamations, +2 st 0.12 (research/PROGRESS.md, study D)
+    style_high_voice_hz: float = 165.0
+    style_high_voice_reg: float = 0.5
+    VOICE_STYLE_MEMO_MAX = 16
+
+    #: Sentence-type intonation (research/PROGRESS.md, study C; 0 = off): the
+    #: model never sees punctuation, so «رفتی؟» renders exactly like «رفتی.».
+    #: frontend.join restores the contour per sentence from its written mark —
+    #: final rise for yes/no questions, no final fall for wh-questions and
+    #: exclamations (scripts/intonation.py). The value scales every shift.
+    intonation: float = 0.0
+
+    #: the neutral sentence the model reads to extend a prompt: «امروز هوا کمی
+    #: سرد است و باد می‌وزد.» (G2P output; chosen on the dev set, research/PROGRESS.md)
+    PROMPT_EXT_PHONEMES = "?emruz havA kami sard ?ast va bAd mivazad"
+
+    def prepare_extension(self, wav_path, out_dir, tries: int = 4,
+                          phonemes: str | None = None, name: str | None = None) -> Path:
+        """Build `<out_dir>/<voice stem>.ext.npy` for prompt self-extension,
+        with no recogniser: the model reads the neutral sentence `tries` times
+        from the plain clip (fixed seeds), the take of median speech length is
+        kept (speech span + one frame of its own trailing quiet) as RAW latents.
+        Run once when a voice is added; synthesis then only reads the file."""
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ph = phonemes or self.PROMPT_EXT_PHONEMES
+        cache, off = self.voice_cache(wav_path, extend=False)
+        takes = []
+        for s in range(tries):
+            lat, _, _ = self._generate_chunk(cache.copy(), off, ph, rng=np.random.default_rng(500 + s))
+            idx = self._speech_frames(self._decode_all(lat), len(lat))
+            if len(idx):
+                z = np.concatenate([x.reshape(1, -1) for x in lat[max(0, int(idx[0]) - 1): int(idx[-1]) + 2]])
+                takes.append((len(idx), z))
+        if not takes:
+            raise RuntimeError("prompt extension: no take carried speech")
+        takes.sort(key=lambda t: t[0])
+        z = takes[len(takes) // 2][1]
+        f = out_dir / (name or f"{Path(wav_path).stem}.ext.npy")
+        tmp = f.with_name(f.name + ".tmp.npy")
+        np.save(tmp, (z * self.emb_std + self.emb_mean).astype(np.float32))
+        os.replace(tmp, f)                      # a reader never sees half a file
+        # cached prompts are stale now (ids key the raw/carrier side tables)
+        self._voice_memo.clear()
+        self._voice_raw.clear()
+        self._carrier_memo.clear()
+        return f
+
+    def _ext_file(self, wav: Path) -> Path | None:
+        """The extension for this clip: `<stem>.<content hash>.ext.npy`, built
+        on first use (once per voice; ~4 short generations) — so a voice a user
+        uploads gets one too, and an uploaded clip that happens to share a
+        built-in's name can never pick up the built-in's extension. A legacy
+        `<stem>.ext.npy` (the research directories) is used when present."""
+        d = Path(self.prompt_ext_dir)
+        digest = hashlib.sha1(wav.read_bytes()).hexdigest()[:12]
+        keyed = d / f"{wav.stem}.{digest}.ext.npy"
+        if keyed.is_file():
+            return keyed
+        legacy = d / f"{wav.stem}.ext.npy"
+        if legacy.is_file():
+            return legacy
+        with self._ext_lock:                    # two first requests build it once
+            if not keyed.is_file():
+                try:
+                    self.prepare_extension(wav, d, name=keyed.name)
+                except Exception as exc:        # no extension is the old behaviour
+                    print(f"prompt extension for {wav.name} not built: {exc}")
+                    return None
+        return keyed
+
+    def _styled_ext(self, f: Path, ext: np.ndarray, style: str) -> np.ndarray:
+        """The extension re-styled: RAW latents -> audio -> TD-PSOLA register /
+        range shift and level -> Mimi encoder -> RAW latents. Memoised per
+        (file, style); ~0.1-0.2 s once."""
+        reg, rng_scale, gain_db = (float(v) for v in self.prompt_styles[style])
+        key = (str(f), f.stat().st_mtime, style, reg, rng_scale, gain_db)
+        memo = self.__dict__.setdefault("_style_memo", {})
+        hit = memo.get(key)
+        if hit is not None:
+            return hit
+        into = _sibling("intonation")
+        z = (ext - self.emb_mean) / self.emb_std
+        audio = self._decode_all([r.reshape(1, -1) for r in z]).astype(np.float64)
+        sr = self.sample_rate
+        if reg or rng_scale != 1.0:
+            f0, hop = into.yin(audio, sr)
+            v = f0 > 0
+            if v.sum() >= 10:
+                med = float(np.median(f0[v]))
+                if med > self.style_high_voice_hz:
+                    reg *= self.style_high_voice_reg
+                st = np.where(v, 12 * np.log2(np.where(v, f0, med) / med), 0.0)
+                sh = reg + (rng_scale - 1.0) * np.clip(st, -8, 8)
+                ts = np.arange(len(audio)) / hop
+                fr = np.arange(len(f0))
+                f0s = np.where(np.interp(ts, fr, v.astype(float)) > 0.5, np.interp(ts, fr, f0), 0.0)
+                audio = into.psola(audio, sr, f0s, 2.0 ** (np.interp(ts, fr, sh) / 12.0)).astype(np.float64)
+        audio = audio * 10 ** (gain_db / 20)
+        pk = float(np.abs(audio).max()) if len(audio) else 0.0
+        if pk > 0.98:
+            audio *= 0.98 / pk
+        n = len(audio) // self.frame_samples * self.frame_samples
+        out = self.s_enc.run(None, {"audio": audio[:n].astype(np.float32)[None, None, :]})[0][0]
+        out = out.astype(np.float32)
+        memo[key] = out
+        while len(memo) > self.VOICE_STYLE_MEMO_MAX:
+            memo.pop(next(iter(memo)))
+        return out
+
+    def _extend_prompt(self, wav: Path, lat, style: str | None = None):
+        if not self.prompt_ext_dir:
+            return lat
+        f = self._ext_file(wav)
+        if f is None:
+            return lat
+        ext = np.load(f).astype(np.float32)
+        if style:
+            ext = self._styled_ext(f, ext, style)
+        ref = lat[0]
+        cap = int(5 * self.frame_rate)
+        # a long clip leaves no room: keep at least prompt_ext_min_s of the
+        # extension by dropping the clip's START (the prompt is "the audio
+        # before the target", so its beginning is the part that matters least)
+        keep_ext = min(len(ext), int(round(self.prompt_ext_min_s * self.frame_rate)))
+        if len(ref) + keep_ext > cap:
+            ref = ref[-(cap - keep_ext):] if cap > keep_ext else ref[:0]
+        room = cap - len(ref)
+        if room <= 0:
+            return lat
+        ext = ext[-room:]
+        both = np.concatenate([ref, ext] if self.prompt_ext_order == "ref+ext" else [ext, ref])
+        return both[None].astype(np.float32)
+
+    def _prompt_state(self, raw):
+        """RAW prompt latents [T, ldim] -> (flow KV cache, offset), the
+        arithmetic of voice_cache without the audio front."""
+        cond = (raw @ self.spk_proj.T).astype(np.float32)
+        text_emb = np.concatenate([self.bos_voice, cond])[None]
+        cache = np.zeros((self.L, 2, self.CAP, self.H, self.D), np.float32)
+        _, _, cache, off = self._flow_step(
+            np.zeros((1, 0, self.ldim), np.float32), text_emb, 0,
+            np.zeros((1, self.ldim), np.float32), cache)
         return cache, off
 
     # ------------------------------------------------------------------
@@ -514,125 +723,42 @@ class OnnxTts:
             return np.concatenate(parts[:-1]) if len(parts) > 1 else parts[0]
         return self.synthesize(text, voice_wav, seed=seed, pace=pace)
 
-    # Phonetic prepositions: when a forced chunk break lands just after a
-    # preposition's first word or two, the PP has barely started — the break
-    # moves back to before the preposition ("…biStar | ?az SabakehAye …"
-    # reads far better than "…?az SabakehAye | tasAdofi …").
+    # Phonetic prepositions: a break right before one starts a prepositional
+    # phrase — one of the joints a reader breathes at.
     _PREPS = {"?az", "bA", "dar", "be", "barAye", "tA", "ruye", "bedune", "vase"}
 
-    def _pack_words(self, words, max_tokens=CHUNK_TOKENS, slack=CHUNK_HEADROOM) -> list[str]:
-        """Greedy word-boundary packing (the loop body of chunk_phonemes):
-        fill a chunk to max_tokens + slack, keep bound pairs (ezafe "1" /
-        light verb / "rA") together up to max_tokens+2, and on a forced break
-        look back for the best joint. Chunks keep the ezafe marker attached.
-
-        `slack` is the headroom the fill may use before a break is forced. It
-        defaults to the +2 that _enforce_budget and the bound-pair rule below
-        already treat as safe (21+ tokens stop terminating), so a clause that
-        fits the hard cap is read in one breath instead of being split
-        mid-clause: a 20-token clause used to be cut right after «rA», leaving
-        a 4-token tail chunk that starts late and reads as a comma pause.
-        chunk_phonemes re-packs with slack=0 (the plain 18-token target) when
-        the wider fill would leave a runt tail."""
-        chunks, cur = [], []
-        for w in words:
-            candidate = " ".join(cur + [w])
-            n = len(self.sp.encode(candidate, out_type=int))
-            over = cur and n > max_tokens + slack
-            bound = (
-                (cur and cur[-1].endswith("1"))   # marked ezafe pair
-                or w in self._LIGHT_VERBS         # compound verb ("Sekannde miSavad")
-                or w == "rA"                      # object marker clings to its noun
-            )
-            if over and not (bound and n <= max_tokens + CHUNK_HEADROOM):
-                # a break is forced — pick the best joint near the overflow:
-                # 1. right after a light verb (it completes its host, and
-                #    what follows starts a fresh unit: "…jadidi miSavad |
-                #    Sabake rA beture…" beats "…Sabake rA | beture…")
-                # 2. right after the object marker "rA" (end of the object
-                #    NP = start of the predicate — always a safe joint:
-                #    "…?amalkard rA | bA hazineye kamtari be dast ?Avardand"
-                #    keeps the final verb phrase in one breath)
-                # 3. before a preposition the break would strand (at most
-                #    one word between prep and break: "…biStar | ?az
-                #    SabakehAye …" not "…?az SabakehAye | tasAdofi …")
-                cut = len(cur)
-                for k in range(len(cur) - 1, max(len(cur) - LOOKBACK_LIGHTVERB, -1), -1):
-                    if cur[k] in self._LIGHT_VERBS or cur[k] == "rA":
-                        cut = k + 1
-                        break
-                if cut == len(cur):
-                    for k in range(len(cur) - 1, max(len(cur) - LOOKBACK_PREP, -1), -1):
-                        if cur[k] in self._PREPS and len(cur) - k <= 2:
-                            cut = k
-                            break
-                if (cut >= MIN_CHUNK_WORDS
-                        and len(self.sp.encode(" ".join(cur[:cut]), out_type=int)) >= MIN_CHUNK_TOKENS):
-                    # guard: a cut must not create a tiny chunk (<6 tokens)
-                    # — the model is unreliable on those ("har taklif rA"
-                    # came out as garbage on whole voices)
-                    chunks.append(" ".join(cur[:cut]))
-                    cur = cur[cut:]
-                else:
-                    chunks.append(" ".join(cur))
-                    cur = []
-                cur = cur + [w]
-            else:
-                # bound pairs stay together even if slightly over budget
-                # (hard cap +2: 21+ tokens stop terminating, so the slack
-                # must never reach past 20)
-                cur = cur + [w]
-        if cur:
-            chunks.append(" ".join(cur))
-        return chunks
-
-    def chunk_phonemes(self, phonemes: str, max_tokens: int = CHUNK_TOKENS) -> list[str]:
-        """Word-boundary packing of a phoneme string into model-sized chunks.
-
-        The model is trained on ~11-token utterances; 18 is the safe budget and
-        at 21+ generations stop terminating (model card), so the fill aims at
-        max_tokens+2 — the cap _enforce_budget already enforces — and drops back
-        to the plain 18 only when the wider fill would end in a runt (a short
-        chunk is generated on its own, starts late and drags dead air in).
-        Never breaks after an ezafe marker ("1") so bound phrases like
-        "?eqtesAde1 ?AmrikA" stay in one chunk. The "1" is stripped from the
-        returned chunks.
-        """
+    def chunk_phonemes(self, phonemes: str, lang: str = "fa") -> list[str]:
+        """One phrase -> word-boundary chunks, each within the generation
+        budget (CHUNK_TOKENS; EN_CHUNK_TOKENS for an English sentence). The
+        ezafe marker "1" guides the breaks and is stripped from the result."""
         words = [w for w in phonemes.split() if w]
-        if self.chunker == "balanced":
-            return [c.replace("1", "") for c in self._chunk_balanced(words)]
+        if lang == "en":
+            budget, cap = EN_CHUNK_TOKENS, EN_CHUNK_TOKENS + EN_CHUNK_HEADROOM
+        else:
+            budget, cap = CHUNK_TOKENS, CHUNK_TOKENS + CHUNK_HEADROOM
+        return [c.replace("1", "") for c in self._chunk_balanced(words, budget, cap, lang)]
 
-        def pack(slack: int) -> list[str]:
-            c = self._pack_words(words, max_tokens, slack=slack)
-            c = self._fix_boundaries(c)
-            c = self._enforce_budget(c, max_tokens)
-            # a trailing 1-2 token chunk reads badly (the model wants >= a few
-            # tokens); merge it into the previous chunk even slightly over
-            # budget — but never past 19 tokens (21+ stop terminating)
-            if len(c) >= 2:
-                tail = len(self.sp.encode(c[-1], out_type=int))
-                merged = len(self.sp.encode(c[-2] + " " + c[-1], out_type=int))
-                if tail <= RUNT_TAIL_TOKENS and merged <= TAIL_MERGE_CAP:
-                    c[-2] = c[-2] + " " + c[-1]
-                    c.pop()
-            return c
+    # English joints, in en_phonemes' phoneme spellings. The Persian break
+    # costs key on ezafe, «را» and Persian verbs, which an English sentence
+    # has none of, so its breaks fell wherever the token count put them:
+    # "…in twenty twenty | three and now…" — and a generation that starts
+    # mid-number garbles its first words (en_numbers: 4 of 6 takes).
+    _EN_NUMBER = {"ziro", "van", "tu", "tri", "for", "fAyv", "siks", "seven", "?eyt",
+                  "nAyn", "ten", "?ileven", "tvelv", "tertin", "fortin", "fiftin",
+                  "sikstin", "seventin", "?eytin", "nAyntin", "tventi", "terdi", "forti",
+                  "fifti", "siksti", "seventi", "?eyti", "nAynti", "handred", "tAvzend",
+                  "milyen", "bilyen", "trilyen", "poynt", "?o", "mAynes", "persent"}
+    # articles, prepositions, conjunctions, possessives: never end a chunk
+    _EN_DANGLING = {"de", "?ey", "?an", "?av", "tu", "?in", "?An", "?at", "for", "vid",
+                    "bAy", "fram", "?intu", "?ebAvt", "?end", "?or", "bat", "mAy", "yor",
+                    "hiz", "her", "?its", "?Aver", "der", "dis", "diz", "doz"}
+    # a reader breathes BEFORE these
+    _EN_BREAK_BEFORE = {"?end", "?or", "bat", "?in", "?An", "?at", "for", "vid", "bAy",
+                        "fram", "tu", "dat", "hu", "bikoz", "so", "ven", "vAyl", "?if",
+                        "den", "viC"}
 
-        chunks = pack(slack=CHUNK_HEADROOM)
-        if len(chunks) >= 2 and (
-                len(_letter_words(chunks[-1])) < MIN_CHUNK_WORDS
-                or len(self.sp.encode(chunks[-1], out_type=int)) < MIN_CHUNK_TOKENS):
-            # the wider fill left a runt tail — re-pack the whole phrase with
-            # the plain 18-token target (pre-slack behaviour; measured cost of
-            # NOT doing this: a 2-token "?ast" chunk + 1.3 s of dead air)
-            chunks = pack(slack=0)
-        return [c.replace("1", "") for c in chunks]
-
-    #: "greedy" fills each chunk to the budget and leaves the rest to the
-    #: next (_pack_words + _fix_boundaries); "balanced" picks every break of a
-    #: phrase at once (_chunk_balanced).
-    chunker = "greedy"
-
-    def _chunk_balanced(self, words: list[str]) -> list[str]:
+    def _chunk_balanced(self, words: list[str], budget: int, cap: int,
+                        lang: str = "fa") -> list[str]:
         """All of a phrase's chunk breaks chosen together (dynamic programming
         over word boundaries), instead of greedily.
 
@@ -653,7 +779,6 @@ class OnnxTts:
         if n <= 1:
             return [" ".join(words)] if words else []
         clean = [w.replace("1", "") for w in words]
-        cap = CHUNK_TOKENS + CHUNK_HEADROOM
         memo: dict[tuple[int, int], int] = {}
 
         def ntok(i: int, j: int) -> int:
@@ -672,13 +797,24 @@ class OnnxTts:
                     c += 8.0                # runt
                 elif t < 9:
                     c += 1.5                # short: reads as a fragment
-            if t > CHUNK_TOKENS:
-                c += 0.75 * (t - CHUNK_TOKENS)
+            if t > budget:
+                c += 0.75 * (t - budget)
             return c
 
         def break_cost(k: int) -> float:
             prev, nxt = words[k - 1], words[k]
             p, q = clean[k - 1], clean[k]
+            if lang == "en":
+                c = 0.0
+                if p in self._EN_NUMBER and q in self._EN_NUMBER:
+                    c += 6.0                # inside a number: "twenty | five"
+                if p in self._EN_DANGLING:
+                    c += 5.0                # "the | company", "in | twenty"
+                elif q == "?av":
+                    c += 2.0                # "of" completes its left word: "a lot | of"
+                elif q in self._EN_BREAK_BEFORE:
+                    c -= 1.0                # "…percent | in twenty twenty three"
+                return c
             clause_end = self._is_finite_verb(p)
             c = 0.0
             if prev.endswith("1") or p.endswith("ye"):
@@ -742,25 +878,6 @@ class OnnxTts:
         A break after one is the clause boundary a reader breathes at."""
         return self._is_light_verb(w) or w == "bAyad" or bool(self._VERB_FORM.match(w))
 
-    def _enforce_budget(self, chunks, max_tokens):
-        """_fix_boundaries moves words across boundaries without checking
-        length, and a moved word can push the receiving chunk past the
-        terminating budget — re-pack any chunk over max_tokens+2 (a
-        19-token chunk was observed in the wild; the old +4 slack allowed
-        22 in theory while 21+ already stop terminating)."""
-        for _ in range(3):
-            if all(len(self.sp.encode(c, out_type=int)) <= max_tokens + CHUNK_HEADROOM
-                   for c in chunks):
-                return chunks
-            repacked = []
-            for c in chunks:
-                if len(self.sp.encode(c, out_type=int)) <= max_tokens + CHUNK_HEADROOM:
-                    repacked.append(c)
-                else:
-                    repacked.extend(self._pack_words(c.split(), max_tokens))
-            chunks = self._fix_boundaries(repacked)
-        return chunks
-
     # Persian function words that must not dangle at a chunk end: a
     # preposition/conjunction without its object makes the model pause after
     # it, which the listener hears as a strange mid-phrase stop. "beture"/
@@ -790,62 +907,10 @@ class OnnxTts:
         "dArad", "dArand", "dAsht", "Ast", "?ast", "bud", "budand",
     }
 
-    def _fix_boundaries(self, chunks: list[str], min_words: int = 3) -> list[str]:
-        """Move words across chunk boundaries so no boundary splits a bound
-        phrase. Each rule moves the previous chunk's LAST word down, then the
-        same boundary is re-checked (rules chain):
-        (a) an ezafe-marked head ("X1") must not END a chunk — its modifier
-            is stranded in the next chunk ("... ?ettesAlAte1 | momken");
-        (b) an ezafe phrase should not START a chunk detached from the word
-            it attaches to ("fAylhA | ruye1 vindoz");
-        (c) a function word must not END a chunk ("... Savad dar | mostanadAt");
-        (d) a conjunction must not START a chunk ("... pAydAr | va qAbele ...")
-            — it binds to its left operand;
-        (e) unmarked compounds: G2P does not always emit the "1" marker (ZWNJ
-            compounds like قابل‌اعتماد come out as "qAbele ?e?temAd"), so an
-            "…e | ?…" pattern across a boundary is treated as a broken word.
-        Rules (b)-(e) never move a word that is itself bound to its LEFT
-        neighbour (an ezafe modifier "…?ettesAlAte1 momken", or a light verb
-        "Sekannde miSavad") — that would trade one split for a worse one
-        (this is exactly how "اتصالات | ممکن" used to get broken).
-
-        NB: these rules run per PHRASE (chunk_phonemes is called per
-        phrase), so a chunk that OPENS a phrase is deliberately never
-        touched — a leading "و"/"که" there follows the writer's own
-        comma/dash pause, which is normal Persian clause prosody; moving
-        it before the pause would fight the punctuation the plan exists
-        to honour.
-        """
-        i = 1
-        while i < len(chunks):
-            prev, nxt = chunks[i - 1].split(), chunks[i].split()
-            left_bound = len(prev) >= 2 and (
-                prev[-2].endswith("1") or prev[-1] in self._LIGHT_VERBS
-                or prev[-1] == "rA")
-            bad = False
-            if len(prev) > min_words:
-                if prev[-1].endswith("1"):
-                    bad = True      # (a) marked ezafe head at chunk end
-                elif not left_bound and nxt and nxt[0].endswith("1"):
-                    bad = True      # (b) ezafe phrase detached from its host
-                elif not left_bound and prev[-1] in self._FUNCTION_WORDS:
-                    bad = True      # (c) dangling preposition/conjunction
-                elif not left_bound and nxt and nxt[0] in self._CONJUNCTIONS:
-                    bad = True      # (d) conjunction split from its operand
-                elif (not left_bound and prev[-1].endswith("e")
-                      and nxt and nxt[0].startswith("?")):
-                    bad = True      # (e) unmarked compound split (qAbele | ?e?temAd)
-            if bad:
-                chunks[i - 1] = " ".join(prev[:-1])
-                chunks[i] = prev[-1] + " " + chunks[i]
-            else:
-                i += 1
-        return chunks
-
     def synthesize(self, phonemes, voice_wav, seed=None, pace=1.0):
         """phonemes: a phoneme string OR a list of phrase strings. In list mode
         every phrase is a pause unit (punctuation-aware splitting is done in
-        the text layer); a phrase longer than ~18 tokens is sub-chunked. Each
+        the text layer); a phrase over the token budget is sub-chunked. Each
         chunk is generated from the pristine voice state (mirrors production:
         copy_state=True — a continued 100+ position context is out of
         distribution and causes early EOS = dropped words). `pace`
@@ -854,7 +919,7 @@ class OnnxTts:
             self.rng = np.random.default_rng(seed)
         return self.synthesize_many([phonemes], voice_wav, pace=pace)[0]
 
-    def _jobs_for(self, phonemes) -> list[tuple[str, float]]:
+    def _jobs_for(self, phonemes, lang: str = "fa") -> list[tuple[str, float]]:
         """One sentence's phrase plan -> generation units [(chunk, gap_before)]."""
         if isinstance(phonemes, str):
             phrases = [(phonemes, None)]
@@ -867,7 +932,7 @@ class OnnxTts:
         # re-absorb a short colon lead-in that the caller kept standalone.
         jobs = []
         for pi, (phrase, pgap) in enumerate(phrases):
-            for ci, chunk in enumerate(self.chunk_phonemes(phrase)):
+            for ci, chunk in enumerate(self.chunk_phonemes(phrase, lang)):
                 if pi == 0 and ci == 0:
                     gap = 0.0
                 elif ci == 0:
@@ -883,7 +948,7 @@ class OnnxTts:
     #: inside Session.run.
     workers = min(4, os.cpu_count() or 4)
 
-    def synthesize_many(self, plans, voice_wav, pace=1.0, langs=None, seed=None) -> list:
+    def synthesize_many(self, plans, voice_wav, pace=1.0, langs=None, seed=None, styles=None) -> list:
         """Several sentences at once -> one audio array per sentence.
 
         All generation units of ALL sentences go into one pool, so a
@@ -892,12 +957,30 @@ class OnnxTts:
         serial rounds of 2-3 parallel chunks). Each unit gets its own rng
         drawn from the engine rng — or from `seed`, which callers sharing
         one engine across threads pass so the take is reproducible — so
-        results do not depend on scheduling."""
+        results do not depend on scheduling. `styles` (one name or None per
+        sentence) picks a prosody-styled prompt (`prompt_styles`)."""
         pace = float(np.clip(pace, 0.6, 1.5))
         voice_cache, voice_off = self.voice_cache(voice_wav)
+        # English sentences may keep the plain clip (prompt_ext_en=False): the
+        # extension is a Persian sentence, and on the bench it helped Persian
+        # units while English ones drifted (research/PROGRESS.md)
+        plain = None
+        if self.prompt_ext_dir and not self.prompt_ext_en and langs and "en" in langs:
+            plain = self.voice_cache(voice_wav, extend=False)
+
+        # styled prompts are built here, before the worker threads start
+        styled = {st: self.voice_cache(voice_wav, style=st)
+                  for st in sorted({x for x in (styles or []) if x})
+                  if self.prompt_ext_dir and self.prompt_styles and st in self.prompt_styles}
+
+        def cache_for(lang, si=None):
+            if plain is not None and lang == "en":
+                return plain
+            st = styles[si] if (styles and si is not None) else None
+            return styled.get(st, (voice_cache, voice_off)) if st else (voice_cache, voice_off)
         jobs, owner = [], []
         for si, ph in enumerate(plans):
-            for job in self._jobs_for(ph):
+            for job in self._jobs_for(ph, langs[si] if langs else "fa"):
                 jobs.append(job)
                 owner.append(si)
         if not jobs:
@@ -907,14 +990,21 @@ class OnnxTts:
 
         def run(i):
             lang = langs[owner[i]] if langs else "fa"
+            vc, vo = cache_for(lang, owner[i])
             return self._generate_with_retry(
-                voice_cache, voice_off, jobs[i][0],
-                rng=np.random.default_rng(int(seeds[i])), lang=lang)
+                vc, vo, jobs[i][0],
+                rng=np.random.default_rng(int(seeds[i])), lang=lang,
+                prime=self._short_prime(vc, vo, jobs[i][0], lang))
 
-        audios = self._run_units(run, range(len(jobs)))
+        if self.prime_tail_s > 0:
+            audios = self._run_primed(jobs, owner, langs, seeds, voice_cache, voice_off,
+                                      len(plans), cache_for=cache_for)
+        else:
+            audios = self._run_units(run, range(len(jobs)))
         if self.verifier is not None:
             audios = self._verify_and_repair(jobs, owner, audios, voice_cache,
-                                             voice_off, langs, rng, len(plans))
+                                             voice_off, langs, rng, len(plans),
+                                             cache_for=cache_for)
 
         out = []
         for si in range(len(plans)):
@@ -942,8 +1032,112 @@ class OnnxTts:
                 return list(ex.map(run, idx))
         return [run(i) for i in idx]
 
+    # ── continuation priming (research/README.md, study B; off by default) ──
+    #: Short-unit carrier priming: a Persian unit of at most this many phoneme
+    #: tokens is generated as the continuation of a carrier phrase whose
+    #: latents (the model's own reading of it, made once per voice) are
+    #: teacher-forced; the carrier's audio is cut away. 0 = off.
+    prime_short_tokens: int = 0
+    prime_carrier: str = "xob"
+    #: frames of the carrier's trailing quiet kept before the unit starts
+    prime_carrier_gap: int = 2
+    #: Tail priming: a unit after the first of its sentence is conditioned on
+    #: the last `prime_tail_s` seconds of the previous unit's speech — the
+    #: model's own training cut (prompt = the audio before the cut, <= 5 s).
+    #: 0 = off. Units of one sentence then run in order (sentences in parallel).
+    prime_tail_s: float = 0.0
+    #: keep the reference clip in front of the tail (prompt = clip + tail, <= 5 s)
+    prime_tail_ref: bool = True
+    #: also prime a sentence's first unit with the previous sentence's tail
+    prime_across_sentences: bool = False
+
+    def _speech_frames(self, audio, n):
+        """Indices of the latent frames carrying speech (within 30 dB of the
+        take's loudest frame)."""
+        fs = self.frame_samples
+        db = np.full(n, -120.0)
+        for k in range(n):
+            seg = audio[k * fs:(k + 1) * fs]
+            if len(seg):
+                db[k] = 20 * np.log10(max(1e-6, float(np.sqrt((seg.astype(np.float64) ** 2).mean()))))
+        return np.where(db > db.max() - 30.0)[0] if n else np.zeros(0, int)
+
+    def _carrier(self, voice_cache, voice_off):
+        """(token ids, latents) of the carrier as this voice reads it: four
+        fixed-seed takes, the median-length one, cut after its last speech
+        frame + `prime_carrier_gap` frames of its own quiet."""
+        key = id(voice_cache)
+        hit = self._carrier_memo.get(key)
+        if hit is not None:
+            return hit
+        takes = []
+        for s in range(4):
+            lat, _, _ = self._generate_chunk(voice_cache.copy(), voice_off, self.prime_carrier,
+                                             rng=np.random.default_rng(1000 + s))
+            idx = self._speech_frames(self._decode_all(lat), len(lat))
+            if len(idx):
+                takes.append((int(idx[-1]), lat))
+        if not takes:
+            return None
+        takes.sort(key=lambda t: t[0])
+        last, lat = takes[len(takes) // 2]
+        z = np.concatenate([x.reshape(1, -1) for x in lat[: last + 1 + self.prime_carrier_gap]])
+        out = (self.sp.encode(self.prime_carrier, out_type=int), z.astype(np.float32))
+        self._carrier_memo[key] = out
+        return out
+
+    def _short_prime(self, voice_cache, voice_off, chunk, lang):
+        if not self.prime_short_tokens or lang == "en":
+            return None
+        if len(self.sp.encode(chunk, out_type=int)) > self.prime_short_tokens:
+            return None
+        return self._carrier(voice_cache, voice_off)
+
+    def _run_primed(self, jobs, owner, langs, seeds, voice_cache, voice_off, n_sent,
+                    cache_for=None):
+        """Tail priming: each sentence's units in order, every unit after the
+        first conditioned on the previous unit's speech tail (+ the clip)."""
+        raw_ref = self._voice_raw.get(id(voice_cache))
+        if self.prime_across_sentences:
+            groups = [list(range(len(jobs)))]
+        else:
+            groups = [[i for i in range(len(jobs)) if owner[i] == si] for si in range(n_sent)]
+            groups = [g for g in groups if g]
+        tail_n = max(1, int(round(self.prime_tail_s * self.frame_rate)))
+        max_prompt = int(5 * self.frame_rate)
+        audios = [None] * len(jobs)
+
+        def run_group(g):
+            prev = None
+            for i in g:
+                lang = langs[owner[i]] if langs else "fa"
+                r = np.random.default_rng(int(seeds[i]))
+                prime = None
+                if prev is not None and len(prev):
+                    tail = prev[-tail_n:]
+                    if self.prime_tail_ref and raw_ref is not None:
+                        raw = np.concatenate([raw_ref[: max(0, max_prompt - len(tail))], tail])
+                    else:
+                        raw = tail
+                    cache, off = self._prompt_state(raw)
+                else:
+                    cache, off = cache_for(lang) if cache_for else (voice_cache, voice_off)
+                    prime = self._short_prime(cache, off, jobs[i][0], lang)
+                speech, (lat, audio) = self._generate_with_retry(
+                    cache, off, jobs[i][0], rng=r, lang=lang, prime=prime, want_latents=True)
+                audios[i] = speech
+                idx = self._speech_frames(audio, len(lat))
+                if len(idx):
+                    z = np.concatenate([x.reshape(1, -1) for x in lat[: int(idx[-1]) + 1]])
+                    prev = (z * self.emb_std + self.emb_mean).astype(np.float32)
+                else:
+                    prev = None
+
+        self._run_units(lambda gi: run_group(groups[gi]), range(len(groups)))
+        return audios
+
     def _verify_and_repair(self, jobs, owner, audios, voice_cache, voice_off,
-                           langs, rng, n_sent):
+                           langs, rng, n_sent, cache_for=None):
         """Transcribe each stitched sentence ONCE, charge the errors to the
         units that made them, regenerate only those, keep each unit's best
         take. A take can be loud, the right length and wrong — the reference
@@ -985,8 +1179,10 @@ class OnnxTts:
             seed_of = dict(zip(bad, fresh))
 
             def again(i):
+                vc, vo = (cache_for(langs[owner[i]] if langs else "fa", owner[i]) if cache_for
+                          else (voice_cache, voice_off))
                 return self._generate_with_retry(
-                    voice_cache, voice_off, jobs[i][0], attempts=2,
+                    vc, vo, jobs[i][0], attempts=2,
                     rng=np.random.default_rng(int(seed_of[i])),
                     lang=langs[owner[i]] if langs else "fa")
 
@@ -1070,8 +1266,12 @@ class OnnxTts:
     #: counters: units, attempts, checks, repaired, asr_errors
     qc_stats: dict | None = None
 
-    def _generate_with_retry(self, voice_cache, voice_off, chunk, attempts=3,
-                             rng=None, lang="fa"):
+    #: takes per unit allowed by the signal-QC retry loop (research: with prompt
+    #: self-extension the retries' extra compute bought little — research/PROGRESS.md)
+    max_attempts: int = 3
+
+    def _generate_with_retry(self, voice_cache, voice_off, chunk, attempts=None,
+                             rng=None, lang="fa", prime=None, want_latents=False):
         """Generate one chunk, retrying when quality is bad. `rng` lets
         parallel callers give each chunk its own independent noise stream
         (the engine's shared rng is not thread-safe). Failure modes,
@@ -1092,20 +1292,28 @@ class OnnxTts:
             cannot hide it).
         Preference order when no attempt is fully clean: loud beats silent,
         enough actual speech beats garbage, more speech beats less (dropped
-        words read short), then less dead air. Returns trimmed speech."""
+        words read short), then less dead air. Returns trimmed speech
+        (with `want_latents`: (speech, the kept take's latents))."""
         tokens = len(self.sp.encode(chunk, out_type=int))
         expected_speech = tokens / self.tps_est  # ~seconds (conservative)
         stats = self.qc_stats
         if stats is not None:
             stats["units"] = stats.get("units", 0) + 1
-        best, best_key = None, None
+        best, best_key, best_lat = None, None, None
+        n_prime = len(prime[1]) if prime is not None else 0
+        if attempts is None:
+            attempts = self.max_attempts
         for _ in range(attempts):
             if stats is not None:
                 stats["attempts"] = stats.get("attempts", 0) + 1
             latents, _, _ = self._generate_chunk(voice_cache.copy(), voice_off, chunk,
-                                                   rng=rng)
-            audio = self._decode_all(latents)
-            s0, e0 = self._speech_bounds(audio)
+                                                   rng=rng, prime=prime)
+            if n_prime:
+                # the causal decoder needs the carrier as context; its samples are cut
+                audio = self._decode_all(list(prime[1]) + latents)[n_prime * self.frame_samples:]
+            else:
+                audio = self._decode_all(latents)
+            s0, e0 = self._speech_bounds(audio, tail_keep=self.tail_keep)
             speech = audio[s0:e0]
             # strip model dead air BEFORE measuring (and returning): a
             # chunk often says its words then trails ~1 s of pre-EOS
@@ -1126,9 +1334,11 @@ class OnnxTts:
             dead = max((j - i) for i, j in regions) / self.sample_rate if regions else 0.0
             key = (loud_ok, dur_ok, solid_dur, 0.0 if dead <= 0.35 else -dead)
             if best_key is None or key > best_key:
-                best, best_key = speech, key
+                best, best_key, best_lat = speech, key, (latents, audio)
             if loud_ok and dur_ok and frac >= 0.55 and dead <= 0.35:
                 break
+        if want_latents:
+            return best, best_lat
         return best
 
     def _speech_bounds(self, p, rel_floor=0.03, head_keep=0.02, tail_keep=0.06,
@@ -1188,18 +1398,34 @@ class OnnxTts:
                 out.append(self.pause(gap))
             out.append(p)
         audio = np.concatenate(out)
-        # peak guard: loudness matching can push peaks past full scale
+        # peak guard: loudness matching can push peaks past full scale. With a
+        # limiter after the join (limiter_ceiling) the peaks are left for it,
+        # so a sentence is not scaled down as a whole
         peak = float(np.abs(audio).max()) if len(audio) else 0.0
-        if peak > 0.98:
+        if peak > 0.98 and not self.limiter_ceiling:
             audio = audio * (0.98 / peak)
         return self._compress_pauses(audio)
 
+    #: Audio kept after a chunk's last solid speech (s). 60 ms cut endings in
+    #: the middle of their decay; 0.20 s with the inserted gaps shortened by
+    #: the same 0.14 s (pauses as long as before): UTMOS +0.008, 95 % CI
+    #: +0.001..+0.014, CER unchanged (eval/fluency.py, 49 cases × 3 seeds).
+    #: Longer pauses on top scored higher still (+0.019) but slow every answer.
+    tail_keep = 0.20
+
     #: Fixed speech RMS for every request (None: each request's own median).
-    level_target: float | None = None
+    #: Renders of one voice differed by 3.4 dB (p10-p90) on eval/fluency.py,
+    #: so a long answer read as several requests stepped in loudness at each
+    #: join. With 0.13 and room_tone: CER 7.1 -> 6.9 %, UTMOS unchanged.
+    level_target: float | None = 0.13
+    #: Peak ceiling of the limiter frontend.join runs on the finished answer
+    #: (None: each chunk / sentence is scaled down when it would clip — the
+    #: research default). Set with a higher level_target to speak louder.
+    limiter_ceiling: float | None = None
     #: Fill inserted pauses with a quiet noise floor instead of digital zero.
     #: The model's own quiet sits near -59 dBFS; an inserted gap of exact
     #: zeros drops below it, which on headphones is the sound switching off.
-    room_tone: bool = False
+    room_tone: bool = True
     _ROOM_TONE_RMS = 0.0011
 
     def pause(self, seconds: float):
@@ -1220,10 +1446,10 @@ class OnnxTts:
         `keep` seconds with small fades, so the flow of speech stays
         continuous. Regions come from windowed quiet density — the model
         peppers its silences with tiny blips that would chop a 1 s pause
-        into sub-threshold runs. Deliberate intra-sentence pauses — strong
-        lead-in 0.26 s, phrase 0.16 s, chunk 0.12 s — stay below `max_pause`
-        untouched; the 0.45 s sentence pause is inserted by the caller,
-        outside this pass."""
+        into sub-threshold runs. Deliberate intra-sentence pauses — chunk tail
+        plus inserted gap: strong lead-in 0.34 s, phrase 0.24 s, chunk 0.22 s
+        — stay below `max_pause` untouched; the sentence pause is inserted by
+        the caller, outside this pass."""
         regions = [r for r in self._dead_air_regions(audio, rel_floor=rel_floor)
                    if (r[1] - r[0]) > int(max_pause * self.sample_rate)]
         if not regions:
@@ -1245,25 +1471,34 @@ class OnnxTts:
         out.append(audio[pos:])
         return np.concatenate(out)
 
-    def _generate_chunk(self, cache, off, chunk, rng=None):
+    def _generate_chunk(self, cache, off, chunk, rng=None, prime=None):
+        """One take. `prime` = (carrier token ids, carrier latents [K, ldim]):
+        the text prefix becomes carrier+chunk and the carrier's latents are
+        teacher-forced after BOS, so the take starts mid-utterance (continuation
+        priming, see `prime_short_tokens`). The returned latents are the
+        chunk's only; the carrier's are not repeated."""
         tokens = self.sp.encode(chunk, out_type=int)
-        text_emb = self.lut[np.asarray(tokens)][None].astype(np.float32)
+        ptoks, plat = prime if prime is not None else ([], np.zeros((0, self.ldim), np.float32))
+        text_emb = self.lut[np.asarray(list(ptoks) + list(tokens))][None].astype(np.float32)
 
         r = rng if rng is not None else self.rng
-        noise = (r.standard_normal((1, self.ldim)) * (self.temp**0.5)).astype(np.float32)
-        lat, _, cache, off = self._flow_step(
-            np.full((1, 1, self.ldim), np.nan, np.float32), text_emb, off, noise, cache)
+        scale = self.temp ** 0.5
+        noise = (r.standard_normal((1, self.ldim)) * scale).astype(np.float32)
+        seq = np.concatenate([np.full((1, self.ldim), np.nan, np.float32),
+                              np.asarray(plat, np.float32).reshape(-1, self.ldim)])[None]
+        lat, _, cache, off = self._flow_step(seq, text_emb, off, noise, cache)
         latents = [lat]
 
         words = len(chunk.split())
         frames_after_eos = (3 if words <= 4 else 1) + 2
         max_gen_len = int(np.ceil((len(tokens) / self.tps_est + self.gen_pad) * self.frame_rate))
         # the BOS step already produced one latent; never decode past capacity
-        max_gen_len = min(max_gen_len, self.max_latents - 1)
+        # (a carrier's frames are decoded together with the take's)
+        max_gen_len = min(max_gen_len, self.max_latents - 1 - len(plat))
 
         eos_step = None
         for step in range(max_gen_len):
-            noise = (r.standard_normal((1, self.ldim)) * (self.temp**0.5)).astype(np.float32)
+            noise = (r.standard_normal((1, self.ldim)) * scale).astype(np.float32)
             lat, eos, cache, off = self._flow_step(
                 latents[-1].reshape(1, 1, self.ldim),
                 np.zeros((1, 0, self.dim), np.float32), off, noise, cache)

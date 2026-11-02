@@ -1,0 +1,391 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+% IEEE conference template (paper/confrence template, 10-17-19), compiled with XeLaTeX (tectonic) for the
+% Persian examples. fontspec and the Persian font MUST be loaded before newtxtext.
+\usepackage{fontspec}
+\newfontfamily\persianfont[Script=Arabic]{Noto Naskh Arabic}
+\TeXXeTstate=1
+\newcommand{\fa}[1]{{\persianfont\beginR #1\endR}}
+\usepackage{cite}
+\usepackage{amsmath,amssymb}
+\usepackage{newtxtext}
+\usepackage{newtxmath}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta}
+\usepackage[hidelinks]{hyperref}
+% Every reported number traces to persian_tts/research/PROGRESS.md. To mark them for checking,
+% use \newcommand{\RES}[1]{\textcolor{red}{#1}}.
+\newcommand{\RES}[1]{#1}
+\newcommand{\CODEURL}{\url{https://github.com/abolfazltorbat/persian_tts}}
+
+\begin{document}
+
+\title{Speaking Through the Prompt: Training-Free Robustness and Expressive Prosody for a Small CPU
+Persian Text-to-Speech Model}
+
+\author{\IEEEauthorblockN{AUTHOR-1}
+\IEEEauthorblockA{\textit{dept. name of organization} \\
+\textit{name of organization}\\
+City, Country \\
+email address}
+\and
+\IEEEauthorblockN{AUTHOR-2}
+\IEEEauthorblockA{\textit{dept. name of organization} \\
+\textit{name of organization}\\
+City, Country \\
+email address}
+}
+
+\maketitle
+
+\begin{abstract}
+Small continuation text-to-speech (TTS) models now run in real time on a laptop CPU, but in practice they
+fail in two ways that their size and training rule out fixing by retraining: they garble short utterances,
+and, trained on text stripped of punctuation, they read every question and exclamation as a flat statement.
+We study both in a public 110M-parameter Persian model and show that the model's second input --- the voice
+prompt it continues --- is a control surface that solves both at inference time. \emph{Robustness:} failures
+depend on how the prompt \emph{ends}; extending the reference clip with the model's own reading of one
+neutral sentence makes every prompt end, as training prompts do, at a finished sentence, which halves failed
+renders on held-out short sentences (\RES{24$\to$12} of \RES{900}) and rescues a clip cut mid-clause
+(\RES{44\%$\to$3\%} error) at no per-request cost. \emph{Expressiveness:} the prompt also carries register
+and pitch range; a re-pitched, widened copy of that reading makes the model itself speak exclamations and
+surprise livelier (pitch range \RES{+38\%}), while a light rule restores only what no prompt can --- the
+sentence ending --- and a loudness plan spans the text. Yes/no questions are then heard as questions three
+times as often by a recogniser used as a listener, exclamations lose almost no naturalness
+(UTMOS \RES{$-$0.02} vs.\ \RES{$-$0.24} for whole-sentence processing), and intelligibility is unchanged.
+Measurement is part of the contribution: one recogniser overstates short-utterance failures five- to
+ten-fold, so we judge with two in consensus.
+\end{abstract}
+
+\begin{IEEEkeywords}
+text-to-speech, Persian, voice prompt, prosody, robustness, inference-time methods, low-resource
+\end{IEEEkeywords}
+
+\section{Introduction}\label{sec:intro}
+\textbf{Topic.} This paper is about controlling a small, already-trained speech synthesiser without
+training it. Continuous audio language models generate speech as a sequence of codec latents, conditioned on
+a short voice prompt that they continue \cite{calm2025}; Pocket TTS distils such a model into a 100M-parameter
+student that runs faster than real time on a laptop CPU \cite{pockettts2026}, and a community Persian student
+trained on 973\,h of speech is public \cite{farsiv2}. We use it, exported to ONNX, as the voice of a
+Persian--English assistant, and ask what can be fixed at inference time alone (Fig.~\ref{fig:concept}).
+
+\begin{figure*}[t]
+\centering
+\input{figures/fig_concept.tex}
+\caption{Speaking through the prompt. The model has two inputs: phonemes, from which punctuation is lost, and
+a voice prompt that it continues. We use the prompt as the control surface. Ending it at the model's own
+finished sentence fixes short utterances (C1, Sec.~\ref{sec:robust}); a livelier copy of that sentence,
+chosen per sentence type, gives exclamations and surprise their delivery, and a rule restores only the
+sentence ending the model cannot know (C2, Sec.~\ref{sec:expr}). The sentence type travels around the model
+in the text layer. Orange: our components.}
+\label{fig:concept}
+\end{figure*}
+
+\textbf{Why it matters in theory.} A prompted model is told \emph{what} to say by its text and \emph{how} to
+say it by its prompt, but which properties of the prompt it actually reads is rarely measured. We find that
+it reads two separate things: where the prompt stops (which sets whether the take begins a new utterance or
+finishes an old one) and the speaker's register and pitch range (which it copies). A second, more general
+point concerns training data: a model trained on punctuation-free transcripts learns every prosodic cue that
+the \emph{words} carry and none that only the \emph{marks} carry, so the missing cues can be located exactly
+and restored outside the model.
+
+\textbf{Why it matters in practice.} The failures fall where an assistant speaks most --- short replies
+(\fa{«باشه»}, \fa{«ممنون از پیامتان»}) and conversational turns that are questions or exclamations. Small
+CPU models matter where GPUs, cloud TTS and licensed training data are not available; for this model the
+24-layer teacher it was distilled from is not even public, so retraining is not an option.
+
+\textbf{The challenges.} (C1) \emph{Short utterances fail}: final syllables are dropped or words garbled,
+and an engine has no reliable way to notice without a recogniser. (C2) \emph{The model cannot hear
+punctuation}: \fa{«رفتی؟»} (``did you go?'') and \fa{«رفتی.»} (``you went.'') reach it as the same tokens,
+so every yes/no question is read as a statement, exclamations sound like news, and loudness never changes
+from sentence to sentence. Behind both lies a measurement problem: the usual recogniser judge hallucinates on
+short audio, and there is no cheap judge of prosody.
+
+\textbf{What we propose.} (i)~\emph{Prompt self-extension:} once per voice the model reads one neutral
+sentence; every later take is conditioned on the reference clip followed by that reading, so the prompt ends
+at a finished sentence, as training prompts do (C1). (ii)~\emph{Prompt styling:} the same reading,
+re-pitched, widened and made louder by signal processing, is the prompt for exclamations and surprised
+questions, so the model itself speaks them higher and livelier; only the prompt is processed (C2).
+(iii)~\emph{An ending rule and a loudness plan} that restore, from the written mark, only what no prompt can
+carry: the final rise of a yes/no question, the suspended end of wh-questions and exclamations, sustained
+energy and sentence-to-sentence loudness (C2). (iv)~\emph{Measurement:} a two-recogniser consensus judge,
+a recogniser used as a listener for sentence type, and real read and expressive Persian speech as references.
+
+\textbf{Results against existing work.} Prior fixes for robustness train the model --- preference alignment
+\cite{koel2025}, short-phrase fine-tuning \cite{gepard2026}, distilled ASR-verified best-of-$N$
+\cite{asaria2026} --- or verify each take with a recogniser; ours needs neither and halves failed short
+renders while dropping retries, which halves generation work. Prior expressive control chooses expressive
+recordings as prompts \cite{expprompt2026} or trains a separate style prompt \cite{indextts2026}; we make the
+expressive prompt from the model's own speech and add only boundary tones, which triples the rate at which
+yes/no questions are heard as questions over a contour rule alone and removes most of its quality cost. All
+code, sentence sets and evaluation scripts are public: \CODEURL.
+
+\section{Related Work}\label{sec:related}
+\textbf{Robust autoregressive TTS.} Hallucinated, repeated and dropped content is a known failure of
+autoregressive TTS \cite{koel2025,borodin2026repetition}; remedies include ASR self-verification and
+distillation \cite{asaria2026}, fine-tuning on 1--2-word inputs \cite{gepard2026} and repetition penalties
+\cite{lemas2026,loopguard2026}. For long-form speech, attention steering \cite{magpielf2026} and boundary-aware
+post-training \cite{liu2026boundary} help, and the acoustic prompt must stay in context
+\cite{lim2026longer}. We vary the prompt itself: how it ends.
+
+\textbf{Sentence type and expressiveness.} In English TTS a final question mark is the main lever on the
+nuclear tune, which can be steered through hidden states \cite{vigneaux2026tunes}; TTS systems under-produce
+rises on yes/no questions and over-produce them on wh-questions \cite{salem2026question}; long prompts help
+reproduce a speaker's intonation \cite{chen2026lptts}. Expressive Prompting selects intense prompts from a
+pool of recordings \cite{expprompt2026}, and IndexTTS2 separates style from timbre prompts
+\cite{indextts2026}. In Persian, yes/no questions end in a high boundary tone, while wh-questions carry the
+nuclear accent on the question word and fall \cite{sadat2011}. Pitch is modified by TD-PSOLA
+\cite{psola1990} on YIN pitch tracks \cite{yin2002}.
+
+\textbf{Persian speech resources.} ManaTTS \cite{manatts2025}, ParsVoice \cite{parsvoice2026}, homograph-aware
+G2P \cite{homorich2025}, the ShEMO emotional speech corpus \cite{shemo2019} and PARSA-Bench
+\cite{parsabench2026}.
+
+\section{Model, Engine and Measurement}\label{sec:measure}
+\textbf{Model and engine.} pocket-tts-farsi-v2 \cite{farsiv2} is a 6-layer student (110M parameters) over
+24\,kHz Mimi latents at 12.5\,Hz \cite{moshi2024}. Each generation unit is
+\texttt{[BOS, voice prompt, phonemes, latents\ldots]}; in training the prompt was the audio \emph{preceding}
+a random word boundary of the same recording, at most 5\,s. A front end splits text into sentences and
+phrases, keeps each sentence's written type, and packs phonemes into units of at most 30 tokens; the G2P
+drops punctuation, and the training transcripts were phonemised with \fa{«؟»} removed (it shares a symbol
+with the glottal stop), so the model has no sentence mark at all.
+
+\textbf{Two recognisers in consensus.} Whisper large-v3-turbo \cite{whisper2023} is a poor judge of short
+audio: on \RES{76} \emph{real} short Persian recordings (\RES{1.8}\,s) it fails \RES{17\%} of correct clips,
+often writing \fa{«موسیقی»} (``music'') for speech, while a Persian wav2vec2-CTC recogniser fails \RES{10.5\%};
+on synthetic short takes the two correlate only \RES{0.23}. A take therefore counts as failed (consonant-skeleton
+CER $>0.3$, short vowels being unwritten in Persian) only if \emph{both} fail it. Under this label
+\RES{1.3\%} of \RES{2{,}070} Persian development takes fail, all in units of at most six phoneme tokens;
+Whisper alone reports \RES{12.3\%} overall and \RES{41\%} for 1--3-token units.
+
+\textbf{A recogniser as listener.} Whisper writes punctuation. For a yes/no question without a question
+particle the words give it no clue, so a final \fa{«؟»} in its transcript means it \emph{heard} a question.
+On such questions it writes \fa{«؟»} for \RES{39\%} (\RES{12/31}) of expressive real speech (ShEMO radio plays
+\cite{shemo2019}), \RES{5\%} (\RES{1/19}) of read speech (GPTInformal, one speaker) and \RES{3\%} of real
+statements --- a coarse but reference-free judge of sentence type.
+
+\textbf{Other measures.} Naturalness by UTMOS \cite{utmos2022} and DNSMOS SIG \cite{dnsmos2022}, used only
+relatively; speaker similarity to the clip by WeSpeaker \cite{wespeaker2023}; F0 by pYIN \cite{pyin2014} in
+semitones (st) re each utterance's median; energy in dB. Paired differences carry 95\% case-bootstrap
+confidence intervals. Development and test sentences are disjoint, and every choice was made on development
+data.
+
+\section{Robustness: How the Prompt Ends}\label{sec:robust}
+\textbf{Post-processing cannot see failed takes.} Before changing the input we asked whether an engine can
+reject bad takes without a recogniser. Signals it has for free --- level, speech fraction, duration per
+vowel, end-of-speech timing, syllable nuclei vs.\ vowels, self- and prompt-similarity of the latents ---
+predict which \emph{units} are risky (case-grouped cross-validated AUC \RES{0.88}, mostly unit length) but not
+which \emph{take} of a unit failed (best within-unit AUC \RES{0.67}). They are not blind in general: takes
+that replay the prompt are separated with AUC \RES{0.98}. Natural failures are short deletions, and these
+they miss. The engine's own retry rule rejects \RES{29\%} of takes, \RES{96\%} of them good, and buys
+\RES{2.35\%$\to$2.15\%} mean error for \RES{49\%} more generation. The fix has to come before generation.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_robust.pdf}
+\caption{How the prompt ends decides whether a short sentence survives. (a) Prompt layouts (zig-zag: the
+prompt stops mid-utterance) and the share of failed short takes on development units (male and female voice,
+consensus judge). Only a prompt ending at a finished sentence helps; more of the same clip does not, the same
+extension cut short multiplies failures, and with the clip last the model reads the extension aloud.
+(b) Held-out: new real clips cut 0.02\,s after their last sound, by where they end, and the engine's
+default voice; the less finished the clip's ending, the larger the gain.}
+\label{fig:robust}
+\end{figure*}
+
+\textbf{Prompt self-extension.} A cleaned reference clip stops right after its last phoneme, so the prompt
+asks the model to continue an unfinished utterance with words it was not given; short targets, with the
+least room to recover, suffer most. Once per voice, the model reads one neutral sentence
+(\fa{«امروز هوا کمی سرد است و باد می‌وزد.»}, ``it is a little cold today and the wind blows'') from the
+plain clip four times with fixed seeds; the take of median speech length (no recogniser) is kept, as raw
+latents, up to its speech end plus one frame. Every later unit is conditioned on the clip followed by the
+last $(5\,\text{s} - |\text{clip}|)$ of this extension. The prompt is encoded once into the key--value cache
+that every unit already copies, so a request costs nothing extra.
+
+\textbf{It is the ending that matters} (Fig.~\ref{fig:robust}a). On 180 paired short development takes per
+voice, the extension cuts failures from \RES{25} to \RES{10} of \RES{360}. Repeating the clip, which adds speech
+but keeps the abrupt ending, does not help (\RES{35}); the same extension cut after two thirds --- same voice,
+same latents, unfinished --- multiplies failures (\RES{120}); and with the clip placed last the model reads the
+extension aloud instead of the text in \RES{94--99\%} of takes (\fa{«بله»} comes out as
+\fa{«امروز هوا کمی سرد ...»}). Teacher-forcing a carrier word, or priming each unit with the previous unit's
+tail, adds nothing. Which sentence is read matters (two of seven candidates helped both voices) and was fixed
+on development data.
+
+\begin{table}[t]
+\caption{Prompt self-extension, held-out (paired renders; change with 95\% CI)}\label{tab:robust}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{2.4pt}
+\begin{tabular}{lccc}
+\toprule
+measure & clip & clip + ext. & change [CI] \\
+\midrule
+\multicolumn{4}{l}{\emph{short set: 60 sentences $\times$ 6 seeds $\times$ 3 voices}} \\
+failed renders (Persian, 900) & \RES{24} & \RES{12} & \\
+consensus CER & \RES{.032} & \RES{.022} & \RES{$-$.011 [$-$.017, $-$.004]} \\
+\quad default voice (1.36\,s clip) & \RES{.060} & \RES{.039} & \RES{$-$.021 [$-$.036, $-$.008]} \\
+UTMOS / speaker sim.\ change & & & \RES{+.13 / $-$.012} \\
+\quad speaker-matched extension take & & & \RES{+.18 / +.009} \\
+\midrule
+\multicolumn{4}{l}{\emph{three new real clips cut 0.02\,s after speech, 3 seeds}} \\
+failed renders (450) & \RES{96} & \RES{19} & \RES{$-$.167 [$-$.233, $-$.106]} \\
+\quad clip ending mid-clause, CER & \RES{.441} & \RES{.030} & \RES{$-$.411 [$-$.546, $-$.288]} \\
+\midrule
+\multicolumn{4}{l}{\emph{bench: 79 mixed cases incl.\ paragraphs, numbers, English}} \\
+consensus CER (Persian) & \RES{.029} & \RES{.023} & \RES{$-$.006 [$-$.010, $-$.001]} \\
+pitch reset at chunk joins (st) & \RES{5.25} & \RES{3.92} & \RES{$-$1.33 [$-$1.95, $-$.77]} \\
+\midrule
+\multicolumn{4}{l}{\emph{default voice, one take instead of the 3-take retry loop}} \\
+consensus CER & \RES{.060} & \RES{.041} & \RES{$-$.019 [$-$.033, $-$.006]} \\
+generations per unit & \RES{2.1} & \RES{1.0} & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Held-out results} (Table~\ref{tab:robust}, Fig.~\ref{fig:robust}b). On 60 unseen short sentences
+rendered through the full production path, failed renders halve and UTMOS rises for every voice. The
+prediction of the mechanism holds on three \emph{new} real clips cut 0.02\,s after their last sound: the
+sentence-final clip improves slightly, the comma clip halves its error, and the mid-clause clip, nearly
+unusable alone, becomes ordinary. On a mixed bench of long and code-mixed text, error also falls, and units
+of one sentence sound less like separate sentences (smaller pitch reset at joins). With the extension a single
+take beats the engine's three-take loop, so retries can be dropped and the generation work halves; on 40
+assistant-style replies this configuration is no worse on any measure with \RES{28\%} fewer generations.
+The cost is speaker similarity on one voice (female, \RES{$-$0.03}); choosing the extension take by speaker
+similarity removes it (\RES{+0.009} pooled) at part of the intelligibility gain. English sentences, read
+through mapped Persian phonemes, keep the plain clip.
+
+\section{Expressiveness: What the Prompt Carries}\label{sec:expr}
+\textbf{Diagnosis.} Because the model never sees a mark, a yes/no question and its statement twin are the
+same audio sample for sample (final-pitch difference \RES{0.00}\,st; \RES{4.75}\,st in real speech). What the
+words carry, the model does reproduce: on wh-questions it accents the question word (\RES{+3.4}\,st; real
+\RES{+3.8}). Real speech also shows what else is missing (Fig.~\ref{fig:expr}e,\,f): renders of exclamations
+lose \RES{5.7}\,dB of energy from their first to their second half, while ShEMO's neutral, surprised and happy
+speech loses \RES{4.0}, \RES{1.8} and \RES{0.6}\,dB; real wh-questions end level (\RES{$-$0.9} to
+\RES{$-$1.4}\,st) but ours fall like statements (\RES{$-$4.4}); and Persian alternative questions
+(\fa{«چای یا قهوه؟»}) fall. A first remedy --- reshaping the whole contour of questions and exclamations by
+TD-PSOLA --- gives questions a final rise but costs \RES{0.24} UTMOS on exclamations, an audible roughness,
+and is barely heard: Whisper writes \fa{«؟»} for \RES{4\%} of such questions. Looking for a pitch direction
+inside the model failed: a linear F0 probe on Mimi latents explains \RES{30\%} of the variance, but pushing
+latents along it changed nothing until the sound broke.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_expr.pdf}
+\caption{Expressiveness from the prompt, endings from the rule (held-out sentences unless noted).
+(a) A yes/no question and its statement twin are one rendering for the model; the rule adds the final rise.
+(b) An exclamation generated from the lively prompt: higher and wider throughout, with no processing of its
+body. (c) Sentence loudness through one text, shipped engine vs.\ ours. (d) Register of the take against the
+register shift of the styled prompt (development, three voices). (e) Yes/no questions heard as questions by
+Whisper, vs.\ real read and expressive speech. (f) Energy of the second half of a sentence relative to the
+first: our exclamations against real speech by emotion (ShEMO).}
+\label{fig:expr}
+\end{figure*}
+
+\textbf{The prompt carries register and pitch range.} Since the model continues its prompt, we let the prompt
+do the expressive part. The self-extension is decoded, its F0 raised by $r$\,st with excursions scaled by $k$
+(TD-PSOLA), its level raised by $g$\,dB, and it is encoded back with the Mimi encoder; the take is generated
+from the clip followed by this \emph{styled} extension and decoded as usual. On \RES{108} development renders
+the take follows the prompt's register --- from a quarter to all of the shift, least for the female voice
+(Fig.~\ref{fig:expr}d) --- and with $(r,k,g)=(4,1.6,4)$ its pitch range widens from \RES{9.0} to
+\RES{12.2}\,st with consensus error, UTMOS, DNSMOS SIG and speaker similarity unchanged (\RES{$-$0.001},
+\RES{+0.07}, \RES{+0.01}, \RES{$-$0.001}). A decode--encode round trip alone moves register by at most
+\RES{0.5}\,st. Stronger styling begins to cost intelligibility, and for a voice whose extension lies above
+165\,Hz the register shift is halved (on the female voice $r=4$ cost \RES{0.40} UTMOS on exclamations, $r=2$
+\RES{0.12}). This \emph{lively} prompt is used for exclamations and surprised questions; a milder one for all
+questions widened the range so much that it deepened the fall before the final rise (yes/no heard as
+questions \RES{12\%$\to$7\%}) and was dropped. Each styled prompt is built once per voice (\RES{0.5}\,s).
+
+\textbf{The rule restores only the ending.} From its written mark, interjections and question words the front
+end types each sentence: statement, yes/no question (with tag questions), wh-question, alternative question,
+surprised or echo question (\fa{«جدی؟»}, \fa{«؟!»}), and exclamation with an intensity that grows with
+\fa{«!!»} and interjections. A yes/no question rises over its \emph{last syllable} only --- found as the energy
+valley before the last vowel nucleus --- along $u^{1.3}$ to 9\,st above the median, and that syllable is
+lengthened by 15\%; a surprised question rises to 8\,st; the final fall of wh-questions and exclamations is
+stopped at $-1$\,st; alternative questions are left to fall; and the second half of questions and
+exclamations is raised by up to 2 and 3.5\,dB with a plain gain envelope, as in excited speech. Over a text,
+exclamations gain +3\,dB times their intensity, surprised questions +2, other questions +0.5, and a
+paragraph's first and last sentences +1 and $-$1.5\,dB; a look-ahead peak limiter keeps the plan intact where
+scaling a whole sentence down would undo it. These settings were chosen on development sentences by the
+recogniser-heard question rate against UTMOS.
+
+\begin{table}[t]
+\caption{Expressiveness, held-out (3 voices $\times$ 2 seeds; 348 question and exclamation renders) and whole
+texts (8 texts, 48 renders). Shipped: contour rule alone; ours: lively prompt + ending rule + plan}\label{tab:expr}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{2.0pt}
+\begin{tabular}{lccc}
+\toprule
+measure & no rule & shipped & ours \\
+\midrule
+yes/no heard as question (\fa{«؟»}) & \RES{3\%} & \RES{4\%} & \RES{12\%} \\
+yes/no $-$ statement, final F0 (st) & \RES{0.00} & \RES{+3.63} & \RES{+3.56} \\
+alt.\ questions, final F0 (st) & \RES{$-$0.40} & \RES{+2.68} & \RES{$-$0.40} \\
+wh-questions, final F0 (st) & \RES{$-$4.35} & \RES{$-$4.35} & \RES{$-$2.99} \\
+surprised q., register (st) & 0 & \RES{+1.05} & \RES{+3.65} \\
+exclam., pitch range (st) & \RES{7.5} & \RES{7.1} & \RES{10.4} \\
+exclam., level (dB) & 0 & \RES{+0.7} & \RES{+2.2} \\
+exclam., 2nd$-$1st half energy (dB) & \RES{$-$5.7} & \RES{$-$7.3} & \RES{$-$4.8} \\
+texts: sentence level SD (dB) & \RES{0.49} & \RES{0.67} & \RES{1.31} \\
+texts: sentence register SD (st) & \RES{1.22} & \RES{1.20} & \RES{1.61} \\
+\midrule
+consensus CER (fails) & \RES{.041 (9)} & \RES{.043 (10)} & \RES{.041 (8)} \\
+$\Delta$UTMOS, all / exclam. & & \RES{$-$.12 / $-$.24} & \RES{$-$.10 / $-$.02} \\
+$\Delta$SIG / $\Delta$speaker sim. & & \RES{$-$.028 / $-$.002} & \RES{$-$.040 / $-$.009} \\
+texts, ours$-$shipped: CER/UTMOS & & & \RES{$-$.001 / $-$.03} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Results} (Table~\ref{tab:expr}, Fig.~\ref{fig:expr}). Yes/no questions are heard as questions three
+times as often as with the contour rule (\RES{12\%} vs.\ \RES{4\%}; read speech \RES{5\%}, expressive
+\RES{39\%}) at the same rise over their statement twins; alternative questions keep their fall;
+wh-questions end \RES{1.4}\,st higher, toward real speech; surprised questions are spoken \RES{3.7}\,st higher
+and \RES{1.9}\,dB louder; exclamations come out with a \RES{38\%} wider pitch range, \RES{2.2}\,dB louder,
+with their energy kept up between real neutral and excited speech, at almost no UTMOS cost (\RES{$-$0.02}
+against \RES{$-$0.24}). Through whole texts, sentence loudness varies twice as much as before
+(\RES{0.67$\to$1.31}\,dB; read speech \RES{1.52}) and register a third more. Intelligibility is unchanged. The
+costs are a small loss of speaker similarity on exclamations (\RES{$-$0.028}) and of UTMOS on surprised one-
+and two-word questions (\RES{$-$0.25}), where both the rise and the prompt act on very little audio.
+
+\textbf{What did not improve clarity.} The default voice renders \RES{10}\,dB weaker at 2.5--6\,kHz than its
+own clip, but equalising each render toward the clip lowered UTMOS and DNSMOS SIG (\RES{$-$0.06} each);
+equalising the prompt instead brightened the take by \RES{4.5}\,dB at a cost in speaker similarity; pitch marks
+from zero-frequency filtering \cite{zff2008} made TD-PSOLA rougher on codec speech (UTMOS \RES{$-$0.37} vs.\
+\RES{$-$0.27} for a flat +2\,st shift); and re-encoding processed audio with the codec hid the processing cost
+but cost \RES{2.1} points of error. The clarity gain that held up was structural: moving the expressive
+work from the signal into the prompt.
+
+\section{Discussion and Limitations}\label{sec:discussion}
+\textbf{One mechanism, two uses.} Both methods follow from how the model was trained: the prompt was the audio
+just before the target. A prompt that stops on a finished sentence asks for a new utterance; one that stops
+mid-phrase asks the model to finish something it was not given the words for, and short targets come out
+truncated or replaced by a replay of the prompt. And because the model learned to continue a speaker, it
+continues that speaker's register and liveliness too --- so the prompt can carry delivery the text cannot. The
+same reasoning applies to any continuation TTS model, and the split of labour --- prompt for the body of a
+sentence, a rule for its boundary tone --- to any model trained on text without punctuation.
+
+\textbf{Limitations.} One model and five voice clips (three of one speaker). Intelligibility is
+recogniser-measured; a first blind A/B test by one listener (60 pairs, default voice) heard no preference
+between plain and extended prompts (same \RES{33}, plain \RES{15}, extended \RES{12}; $p=\RES{.70}$), and its
+error marks fell on other takes than the recognisers' failures. Expressiveness is measured acoustically and
+through one recogniser whose question rate is itself only \RES{39\%} on real expressive speech; the
+expressive reference (ShEMO) is acted radio speech whose texts we attached by recogniser matching
+(\RES{279} of \RES{760} clips) and which has no speaker labels. Style strengths and the extension sentence are
+hyperparameters chosen on few development renders. A listening test of the whole pipeline is the next step.
+
+\section{Conclusion}\label{sec:conclusion}
+A small CPU TTS model can be made both more robust and more expressive without training, through the one
+input that carries acoustics into the model: its voice prompt. Ending the prompt at the model's own finished
+sentence halves failed short renders, rescues clips cut mid-utterance and lets the engine drop its retries.
+Re-styling that sentence makes the model itself speak exclamations and surprise higher and livelier, so the
+signal processing shrinks to sentence endings and a loudness plan, and questions are heard as questions three
+times as often at no loss of intelligibility. A two-recogniser consensus and a recogniser used as a listener
+made both effects measurable. The engine, sets and scripts are available at \CODEURL.
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+\end{document}

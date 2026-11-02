@@ -1,0 +1,44 @@
+% Fig. 1 — the engine and where each contribution sits (included with \input in main.tex)
+\begin{tikzpicture}[x=1cm,y=1cm,font=\scriptsize,
+  box/.style={draw=black!55,rounded corners=2pt,fill=black!4,align=center,minimum height=0.95cm,inner sep=2.5pt},
+  ours/.style={box,draw=orange!80!black,fill=orange!14,line width=0.7pt},
+  diag/.style={box,draw=black!45,fill=white,dashed},
+  arr/.style={-{Stealth[length=1.6mm]},draw=black!70,line width=0.6pt},
+  side/.style={-{Stealth[length=1.6mm]},draw=orange!80!black,line width=0.6pt},
+  tag/.style={font=\tiny\bfseries,text=orange!70!black}]
+% main row
+\node[box,minimum width=1.75cm] (txt) at (0,0) {written text\\[-1pt]\fa{فایل را ذخیره کردید؟}};
+\node[box,minimum width=2.05cm] (fe) at (2.55,0) {front end\\[-1pt]sentences, phrases\\[-1pt]\textbf{type} (\fa{؟}\,!\,.)};
+\node[box,minimum width=1.9cm] (g2p) at (5.0,0) {G2P\\[-1pt]phonemes\\[-1pt]{\color{red!70!black}punctuation lost}};
+\node[box,minimum width=2.15cm] (lm) at (7.6,0) {flow LM (110M)\\[-1pt]+ Mimi decoder\\[-1pt]one take per unit};
+\node[box,minimum width=1.45cm] (join) at (10.05,0) {stitch \&\\[-1pt]join sentences};
+\node[ours,minimum width=2.45cm] (into) at (12.5,0) {\textbf{sentence-type prosody}\\[-1pt]final rise / no fall,\\[-1pt]energy, loudness plan};
+\node[box,minimum width=0.9cm] (out) at (14.6,0) {audio};
+\draw[arr] (txt) -- (fe);
+\draw[arr] (fe) -- (g2p);
+\draw[arr] (g2p) -- (lm);
+\draw[arr] (lm) -- (join);
+\draw[arr] (join) -- (into);
+\draw[arr] (into) -- (out);
+% sentence type bypasses the model
+\draw[side,dashed] (fe.north) -- ++(0,0.55) -| node[pos=0.25,above,font=\tiny,text=black!75]{sentence type kept in the text layer: question / wh-question / exclamation / statement} (into.north);
+\node[tag,anchor=south east] at (into.north east) {C, D (Sec.~\ref{sec:c}, \ref{sec:d})};
+% voice prompt row
+\node[box,minimum width=1.75cm] (clip) at (2.55,-1.55) {reference clip\\[-1pt]($\le$5\,s, often cut tight)};
+\node[ours,minimum width=3.15cm] (ext) at (6.0,-1.55) {\textbf{prompt self-extension}\\[-1pt]clip + model's own reading\\[-1pt]of one neutral sentence (once)};
+\draw[arr] (clip) -- (ext);
+\draw[side] (ext.north) -- node[right,font=\tiny,text=black!75,pos=0.45]{voice prompt} (ext.north |- lm.south) ;
+\node[tag,anchor=north east] at (ext.south east) {B (Sec.~\ref{sec:b})};
+% prosody-styled prompt (study D)
+\node[ours,minimum width=3.4cm] (sty) at (6.0,-2.95) {\textbf{prosody-styled prompt}\\[-1pt]extension re-pitched, widened, louder\\[-1pt]per sentence type (built once)};
+\draw[arr] (ext.south) -- (sty.north);
+\draw[side] (sty.east) -| node[pos=0.75,right,font=\tiny,text=black!75]{livelier prompt for \fa{!}\,/\,\fa{؟}} ([xshift=0.35cm]lm.south);
+\draw[side,dashed] ([xshift=-0.12cm]fe.south west) |- (sty.west);
+\node[tag,anchor=north east] at (sty.south east) {D (Sec.~\ref{sec:d})};
+% diagnosis and measurement
+\node[diag,minimum width=2.4cm] (chk) at (10.05,-1.55) {take check without ASR\\[-1pt]finds risky \emph{units},\\[-1pt]not failed takes};
+\draw[arr,dashed,draw=black!45] (lm.south east) ++(-0.2,0) |- (chk.west);
+\node[tag,text=black!60,anchor=north east] at (chk.south east) {A (Sec.~\ref{sec:a})};
+\node[diag,minimum width=2.5cm] (judge) at (13.1,-1.55) {evaluation: Whisper $\wedge$\\[-1pt]wav2vec2 consensus,\\[-1pt]F0 vs.\ real speech};
+\draw[arr,dashed,draw=black!45] (out.south) |- (judge.east);
+\end{tikzpicture}

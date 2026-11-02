@@ -1,0 +1,111 @@
+# id	lang	cat	text   — DEV set for the ASR-free detector (thresholds are tuned here, never on eval/cases.py)
+d_s01	fa	short	بله.
+d_s02	fa	short	نه، ممنون.
+d_s03	fa	short	باشه.
+d_s04	fa	short	خواهش می‌کنم.
+d_s05	fa	short	کجا هستی؟
+d_s06	fa	short	چرا؟
+d_s07	fa	short	حتماً.
+d_s08	fa	short	خسته نباشید.
+d_s09	fa	short	صبر کن.
+d_s10	fa	short	فهمیدم.
+d_s11	fa	short	درست است.
+d_s12	fa	short	چه خبر؟
+d_s13	fa	short	عالی بود!
+d_s14	fa	short	متأسفم.
+d_s15	fa	short	بفرمایید.
+d_s16	fa	short	ساعت چند است؟
+d_s17	fa	short	فردا می‌بینمت.
+d_s18	fa	short	لطفاً بنشینید.
+d_s19	fa	short	اسم شما چیست؟
+d_s20	fa	short	کار تمام شد.
+d_s21	fa	short	دیر کردی.
+d_s22	fa	short	نمی‌دانم.
+d_s23	fa	short	برو جلو.
+d_s24	fa	short	چقدر شد؟
+d_s25	fa	short	تبریک می‌گویم!
+d_s26	fa	short	آماده‌ای؟
+d_s27	fa	short	یک لحظه.
+d_s28	fa	short	موفق باشید.
+d_s29	fa	short	شب بخیر.
+d_s30	fa	short	چه جالب!
+d_c01	fa	casual	امروز خیلی خسته‌ام و می‌خواهم زود بخوابم.
+d_c02	fa	casual	اگر وقت داشتی یک سر به من بزن.
+d_c03	fa	casual	این فیلم را دیدی؟ به نظرم خیلی خوب بود.
+d_c04	fa	casual	نگران نباش، همه چیز درست می‌شود.
+d_c05	fa	casual	شام چی درست کنیم؟ من که گرسنه‌ام.
+d_c06	fa	casual	بچه‌ها توی حیاط بازی می‌کنند.
+d_c07	fa	casual	گوشی‌ام خاموش شده بود، ببخشید.
+d_c08	fa	casual	هفته‌ی بعد می‌رویم شمال، تو هم می‌آیی؟
+d_c09	fa	casual	قهوه می‌خوری یا چای؟
+d_c10	fa	casual	کلید را روی میز گذاشتم.
+d_c11	fa	casual	بیرون باران می‌آید، چتر بردار.
+d_c12	fa	casual	مامان زنگ زد و سلام رساند.
+d_c13	fa	casual	این کتاب را از کتابخانه گرفتم.
+d_c14	fa	casual	ترافیک امروز وحشتناک بود.
+d_c15	fa	casual	یادت باشد فردا نان بخری.
+d_f01	fa	formal	سازمان هواشناسی برای روزهای آینده بارش پراکنده پیش‌بینی کرده است.
+d_f02	fa	formal	دانشگاه تهران قدیمی‌ترین دانشگاه مدرن ایران به شمار می‌رود.
+d_f03	fa	formal	انرژی خورشیدی یکی از منابع پاک و تجدیدپذیر انرژی است.
+d_f04	fa	formal	موتورهای الکتریکی در مقایسه با موتورهای احتراقی بازده بیشتری دارند.
+d_f05	fa	formal	نتایج این پژوهش نشان می‌دهد که مصرف آب در کشاورزی کاهش یافته است.
+d_f06	fa	formal	مجلس شورای اسلامی لایحه‌ی بودجه را در جلسه‌ی علنی بررسی کرد.
+d_f07	fa	formal	شبکه‌های عصبی از لایه‌های متعددی از نورون‌های مصنوعی تشکیل شده‌اند.
+d_f08	fa	formal	حافظ شیرازی یکی از بزرگ‌ترین شاعران زبان فارسی است.
+d_f09	fa	formal	کارشناسان معتقدند که تورم در ماه‌های آینده کاهش خواهد یافت.
+d_f10	fa	formal	باتری‌های لیتیومی در دمای پایین ظرفیت کمتری دارند.
+d_f11	fa	formal	این پروژه با همکاری چند دانشگاه داخلی و خارجی انجام شده است.
+d_f12	fa	formal	سرعت اینترنت در شهرهای بزرگ به‌طور محسوسی افزایش یافته است.
+d_f13	fa	formal	شرکت برق منطقه‌ای از نصب ده هزار کنتور هوشمند خبر داد.
+d_f14	fa	formal	تخت جمشید در فهرست میراث جهانی یونسکو ثبت شده است.
+d_f15	fa	formal	پژوهشگران روش تازه‌ای برای ذخیره‌سازی انرژی معرفی کرده‌اند.
+d_f16	fa	formal	دریای خزر بزرگ‌ترین دریاچه‌ی جهان است.
+d_f17	fa	formal	مدیرعامل شرکت از افزایش صادرات محصولات خبر داد.
+d_f18	fa	formal	کیفیت هوای پایتخت امروز در وضعیت ناسالم قرار دارد.
+d_f19	fa	formal	برنامه‌ی درسی مدارس در سال تحصیلی جدید بازنگری می‌شود.
+d_f20	fa	formal	استفاده از حمل‌ونقل عمومی آلودگی هوا را کاهش می‌دهد.
+d_n01	fa	numeric	قیمت این گوشی ۱۲ میلیون تومان است.
+d_n02	fa	numeric	قطار ساعت ۷:۴۵ صبح حرکت می‌کند.
+d_n03	fa	numeric	جمعیت ایران حدود ۸۵ میلیون نفر است.
+d_n04	fa	numeric	دمای هوا به ۴۲ درجه رسید.
+d_n05	fa	numeric	این خانه ۱۲۰ متر مساحت دارد.
+d_n06	fa	numeric	او در سال ۱۳۷۵ به دنیا آمد.
+d_n07	fa	numeric	نرخ بیکاری به ۸ درصد کاهش یافت.
+d_n08	fa	numeric	مسافت تهران تا مشهد حدود ۹۰۰ کیلومتر است.
+d_n09	fa	numeric	جلسه روز ۱۵ مهر برگزار می‌شود.
+d_n10	fa	numeric	سه نفر از ۲۰ نفر غایب بودند.
+d_m01	mix	mixed	من با Python یک برنامه‌ی ساده نوشتم.
+d_m02	mix	mixed	لطفاً فایل PDF را برایم ایمیل کن.
+d_m03	mix	mixed	سرور ما روی Linux اجرا می‌شود.
+d_m04	mix	mixed	این مدل با PyTorch آموزش داده شده است.
+d_m05	mix	mixed	برای ورود باید password جدید بسازید.
+d_m06	mix	mixed	تیم ما از GitHub برای مدیریت کد استفاده می‌کند.
+d_m07	mix	mixed	گوشی جدید Samsung دوربین خوبی دارد.
+d_m08	mix	mixed	این API پاسخ را به صورت JSON برمی‌گرداند.
+d_m09	mix	mixed	جلسه‌ی بعدی را روی Zoom برگزار می‌کنیم.
+d_m10	mix	mixed	دیتابیس ما PostgreSQL است.
+d_m11	mix	mixed	من هر روز در LinkedIn پست می‌گذارم.
+d_m12	mix	mixed	کارت گرافیک NVIDIA برای deep learning مناسب است.
+d_m13	mix	mixed	این وب‌سایت با React ساخته شده است.
+d_m14	mix	mixed	لپ‌تاپ من Windows دارد.
+d_m15	mix	mixed	برای ترجمه از Google Translate استفاده کردم.
+d_e01	en	english	Please send me the report by Friday.
+d_e02	en	english	The meeting has been moved to next week.
+d_e03	en	english	Thank you very much.
+d_e04	en	english	Our new model runs entirely on the CPU.
+d_e05	en	english	The train leaves at seven thirty in the morning.
+d_e06	en	english	Can you hear me now?
+d_e07	en	english	This software is free and open source.
+d_e08	en	english	The battery lasts for about ten hours.
+d_e09	en	english	I will call you later.
+d_e10	en	english	Electric cars are becoming more popular every year.
+d_l01	fa	long	در سال‌های اخیر، با گسترش استفاده از تلفن‌های هوشمند، شیوه‌ی ارتباط مردم با یکدیگر تغییر کرده است و بسیاری از کارهای روزمره به صورت آنلاین انجام می‌شود.
+d_l02	fa	long	موتور سنکرون مغناطیس دائم به دلیل بازده بالا و چگالی توان زیاد، در خودروهای برقی کاربرد گسترده‌ای پیدا کرده است.
+d_l03	fa	long	اگر می‌خواهید زبان جدیدی یاد بگیرید، بهتر است هر روز دست‌کم نیم ساعت تمرین کنید و از فیلم‌ها و کتاب‌های ساده شروع کنید.
+d_l04	fa	long	این گزارش نشان می‌دهد که سهم انرژی‌های تجدیدپذیر در تولید برق کشور طی پنج سال گذشته دو برابر شده است.
+d_l05	fa	long	پس از پایان جلسه، اعضای هیئت مدیره درباره‌ی برنامه‌ی سال آینده و بودجه‌ی پیشنهادی گفت‌وگو کردند.
+d_l06	fa	long	برای نگهداری بهتر باتری، از شارژ کامل و تخلیه‌ی کامل آن خودداری کنید و دستگاه را در جای خنک نگه دارید.
+d_l07	fa	long	شهر اصفهان با بناهای تاریخی، پل‌های قدیمی و میدان نقش جهان، هر سال میزبان هزاران گردشگر داخلی و خارجی است.
+d_l08	fa	long	کارشناسان توصیه می‌کنند که فشار باد لاستیک‌های خودرو هر ماه یک بار بررسی شود.
+d_l09	fa	long	با وجود همه‌ی مشکلات، تیم ملی توانست در دیدار پایانی با نتیجه‌ی دو بر یک پیروز شود.
+d_l10	fa	long	هوش مصنوعی می‌تواند در پیش‌بینی مصرف برق، تشخیص خرابی تجهیزات صنعتی و بهینه‌سازی تولید به مهندسان کمک کند.

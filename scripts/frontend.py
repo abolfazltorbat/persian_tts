@@ -43,7 +43,7 @@ def _sibling(name: str):
 
 #: Bump on any change that alters what is spoken — it is part of every audio
 #: cache key downstream, so stale audio is never served after a fix.
-FRONTEND_VERSION = "2026.10.11"
+FRONTEND_VERSION = "2026.11.01"
 
 _FA_LETTERS = "؀-ۿ"
 _HAS_FA = re.compile(f"[{_FA_LETTERS}]")
@@ -215,6 +215,7 @@ def expand_abbreviations(text: str) -> str:
 class Sentence:
     text: str
     lang: str          # "fa" (incl. Persian with Latin words) or "en"
+    para_end: bool = False   # the last sentence before a blank line
 
 
 # A period followed by whitespace ends a sentence unless it sits between two
@@ -462,15 +463,20 @@ def speakable(text: str) -> list[Sentence]:
     """
     t = expand_abbreviations(clean_chars(text))
     out = []
-    for raw in split_sentences(t):
-        lang = sentence_lang(raw)
-        # Latin tokens first: "GPT-4" must become "GPT 4" before digits are
-        # read, or the hyphen survives as a dangling "GPT- چهار".
-        s = split_latin(raw)
-        s = expand(s, lang)
-        s = _tidy(s, lang)
-        if re.search(rf"[{_FA_LETTERS}A-Za-z]", s):
-            out.append(Sentence(s, lang))
+    for para in re.split(r"\n[ \t]*\n", t):
+        for raw in split_sentences(para):
+            lang = sentence_lang(raw)
+            # Latin tokens first: "GPT-4" must become "GPT 4" before digits are
+            # read, or the hyphen survives as a dangling "GPT- چهار".
+            s = split_latin(raw)
+            s = expand(s, lang)
+            s = _tidy(s, lang)
+            if re.search(rf"[{_FA_LETTERS}A-Za-z]", s):
+                out.append(Sentence(s, lang))
+        if out:
+            out[-1].para_end = True
+    if out:
+        out[-1].para_end = False          # nothing follows the last one
     return out
 
 
@@ -481,6 +487,24 @@ def speakable_text(text: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 #  Mixed-script G2P
 # ══════════════════════════════════════════════════════════════════════════════
+
+# Persian never sets two vowels side by side inside a word: a suffix after the
+# silent-h «e» starts with a glottal stop («داده‌اند» dAde?and, «خانه‌ام»
+# xAne?am, «نامه‌ای» nAme?i). The G2P writes it only sometimes — «شده‌اند»
+# alone is «Sode ?and», inside a sentence «Sodeand». Inserted (2026-10-24,
+# eval/fluency.py, 7 cases × 5 seeds): UTMOS +0.047 (95 % CI +0.010..+0.084),
+# CER unchanged; «برنامه‌اش» stopped coming out as «برنامهش». Written without
+# a space: «dAde ?and» split the verb (heard «شده. انکه») for no CER gain.
+# Before «i» only a word-final suffix counts (-ei, -eim, -eid): «xeili» is
+# the G2P's spelling of the diphthong in «خیلی», not two vowels.
+_HIATUS = re.compile(r"(?<=[^\s?])e(?=[aAou]|i[md]?(?:\s|$))")
+
+
+def hiatus(ph: str) -> str:
+    """«dAdeand» -> «dAde?and». Persian segments only: English phonemes come
+    from en_phonemes and never pass through here."""
+    return _HIATUS.sub("e?", ph)
+
 
 class MixedG2P:
     """OnnxG2P + English, with the same `phonemise` signature, so the engine's
@@ -504,7 +528,7 @@ class MixedG2P:
             elif any(ch.isalnum() for ch in seg):     # punctuation debris is not text
                 ph = self.inner.phonemise(seg, keep_ezafe=keep_ezafe)
                 if ph:
-                    out.append(ph)
+                    out.append(hiatus(ph))
         return " ".join(out)
 
 
@@ -528,27 +552,96 @@ def plan(engine, text: str, *, pack: bool = False):
     return sents, plans
 
 
-def render(engine, text: str, voice_wav: str, *, seed: int | None = None,
-           pace: float = 1.0, pack: bool = False):
-    """Text → (float32 audio, phoneme summary). Every sub-chunk of every
-    sentence is generated in ONE parallel batch (synthesize_many), so a
-    multi-sentence chunk no longer waits sentence by sentence."""
+def join(engine, sents, audios, pace: float = 1.0, *, para_start: bool = True,
+         para_end: bool = True):
+    """Per-sentence audio -> one answer: the sentence pause between sentences,
+    the paragraph pause after a paragraph's last one. ONE copy for every
+    caller (speak.py, the demo server, the chatbot runtime), so the pauses
+    cannot drift apart between them.
+
+    With `engine.intonation` > 0 each sentence also gets the prosody of its
+    written type (scripts/intonation.py). Version 2 adds a loudness plan over
+    the text, which needs to know where paragraphs start and end: blank lines
+    inside the text say so, and `para_start` / `para_end` say whether this
+    text's first sentence opens a paragraph and its last one closes it (True
+    for a whole text; a caller speaking a text in pieces passes what it knows)."""
     import numpy as np
 
-    SENTENCE_GAP = _sibling("tts_onnx").SENTENCE_GAP
+    tts_onnx = _sibling("tts_onnx")
+    strength = float(getattr(engine, "intonation", 0.0) or 0.0)
+    into = _sibling("intonation") if strength > 0 else None
+    v2 = into is not None and getattr(into, "VERSION", 1) >= 2
+    ceiling = getattr(engine, "limiter_ceiling", None)
+    n = len(sents)
+    parts = []
+    opens = para_start                 # does the next sentence open a paragraph?
+    for i, (s, a) in enumerate(zip(sents, audios)):
+        first, opens = opens, bool(s.para_end)
+        if not len(a):
+            continue
+        if parts:
+            parts.append(engine.pause(gap / max(pace, 0.1)))
+        a = np.asarray(a, dtype=np.float32)
+        if v2:
+            # paragraph place only means something in a text of several sentences
+            closes = bool(s.para_end) or (i == n - 1 and para_end)
+            multi = n > 1
+            a = into.process(a, engine.sample_rate, s.text, strength,
+                             para_first=multi and first and not closes,
+                             para_last=multi and closes and not first,
+                             peak_guard=ceiling is None)
+        elif into is not None:
+            # the written mark is still on the sentence; the audio is not
+            kind = into.sentence_kind(s.text)
+            if kind in into.MODIFIED:
+                a = into.apply(a, engine.sample_rate, kind, strength, s.text)
+        parts.append(a)
+        trace = getattr(engine, "join_trace", None)
+        if trace is not None:            # research: per-sentence audio as joined
+            trace.append((s.text, a))
+        gap = tts_onnx.PARAGRAPH_GAP if s.para_end else tts_onnx.SENTENCE_GAP
+    out = np.concatenate(parts).astype(np.float32) if parts else np.zeros(0, np.float32)
+    if ceiling:
+        # a louder level target only works if peaks are limited, not whole
+        # sentences scaled down (see intonation.limit)
+        out = _sibling("intonation").limit(out, engine.sample_rate, float(ceiling))
+    return out
+
+
+def styles_for(engine, sents) -> list | None:
+    """Per sentence, the prosody-styled prompt its written type asks for
+    (intonation.STYLE_OF_KIND; e.g. an exclamation is generated from a livelier
+    prompt), or None when the engine has no styles / intonation is off."""
+    if not (float(getattr(engine, "intonation", 0.0) or 0.0) > 0 and getattr(engine, "prompt_styles", None)):
+        return None
+    into = _sibling("intonation")
+    table = getattr(into, "STYLE_OF_KIND", {})
+    out = [table.get(into.sentence_plan(s.text)[0]) if s.lang != "en" else None for s in sents]
+    return out if any(out) else None
+
+
+def render(engine, text: str, voice_wav: str, *, seed: int | None = None,
+           pace: float = 1.0, pack: bool = False, para_start: bool = True,
+           para_end: bool = True):
+    """Text → (float32 audio, phoneme summary). Every sub-chunk of every
+    sentence is generated in ONE parallel batch (synthesize_many), so a
+    multi-sentence chunk no longer waits sentence by sentence. `para_start` /
+    `para_end`: see join (a caller speaking one text in pieces passes them)."""
+    import numpy as np
+
     if seed is not None:
         engine.rng = np.random.default_rng(seed)
     sents, plans = plan(engine, text, pack=pack)
     phon = " | ".join(" ".join(p for p, _ in pl) for pl in plans)
     if not plans:
         return np.zeros(0, np.float32), phon
+    kw = {}
+    styles = styles_for(engine, sents)
+    if styles:
+        kw["styles"] = styles
     audios = engine.synthesize_many(plans, voice_wav, pace=pace,
-                                    langs=[s.lang for s in sents])
-    gap = engine.pause(SENTENCE_GAP / max(pace, 0.1))
-    parts = []
-    for a in audios:
-        parts += [a, gap]
-    return np.concatenate(parts[:-1]).astype(np.float32), phon
+                                    langs=[s.lang for s in sents], **kw)
+    return join(engine, sents, audios, pace, para_start=para_start, para_end=para_end), phon
 
 
 if __name__ == "__main__":

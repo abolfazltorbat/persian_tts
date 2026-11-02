@@ -6,10 +6,12 @@
     # naturalness (a python with torch; scores the saved WAVs of each tag)
     python eval/fluency.py --utmos base t04 --utmos-model /path/utmos.jit
     python eval/fluency.py --compare base t04
+    python eval/fluency.py --rescore base t04     # after a scorer change
 
-The model reads at most ~18 phoneme tokens per generation, so a sentence is
-several independent generations stitched together, and a listener hears every
-join. eval/harness.py asks "were the words right?"; this asks, per join:
+One generation reads at most CHUNK_TOKENS (+ headroom) phoneme tokens, so a
+long sentence is several independent generations stitched together, and a
+listener hears every join. eval/harness.py asks "were the words right?"; this
+asks, per join:
 
   join_sil_ms   silence a listener hears at a mid-clause chunk join (the
                 chunk's own tail/head quiet + the inserted gap). Speech has
@@ -33,8 +35,8 @@ join. eval/harness.py asks "were the words right?"; this asks, per join:
                 against their own reference: ~0.2–0.3.
 
 Every row is (case × voice × seed); a variant is judged on the mean. Knobs
-(`--knobs` JSON) set engine attributes ("temp") or tts_onnx module constants
-("tts_onnx._CHUNK_GAP") for one run, so a sweep never edits the code.
+(`--knobs` JSON) set engine attributes ("temp") or tts_onnx / frontend module
+constants ("tts_onnx._CHUNK_GAP") for one run, so a sweep never edits the code.
 """
 from __future__ import annotations
 
@@ -195,14 +197,15 @@ def join_metrics(sentences: list[list[tuple]], sr: int, chunk_gap: float) -> dic
 
 
 def apply_knobs(eng, knobs: dict) -> None:
-    import tts_onnx
+    import importlib
 
     for k, v in knobs.items():
-        if k.startswith("tts_onnx."):
-            name = k.split(".", 1)[1]
-            if not hasattr(tts_onnx, name):
-                raise SystemExit(f"tts_onnx has no {name!r}")
-            setattr(tts_onnx, name, v)
+        mod_name, _, name = k.partition(".")
+        if name and mod_name in ("tts_onnx", "frontend", "intonation"):
+            mod = importlib.import_module(mod_name)
+            if not hasattr(mod, name):
+                raise SystemExit(f"{mod_name} has no {name!r}")
+            setattr(mod, name, v)
         else:
             if not hasattr(eng, k):
                 raise SystemExit(f"engine has no attribute {k!r}")
@@ -230,13 +233,18 @@ def run(a) -> int:
     knobs = json.loads(a.knobs) if a.knobs else {}
     apply_knobs(eng, knobs)
     asr = harness.Asr(a.asr_device, a.asr_model)
+    if a.verify:
+        # the engine's ASR self-check (chatbot TTS_VERIFY). NB it shares this
+        # Whisper with the judge, so its gain here is an upper bound
+        from verify import AsrVerifier
+        eng.verifier = AsrVerifier(asr.model)
 
     jobs_log: list[list] = []
     stitched: list[list] = []
     orig_jobs, orig_stitch = eng._jobs_for, eng._stitch
 
-    def jobs_spy(ph):
-        j = orig_jobs(ph)
+    def jobs_spy(ph, *args, **kw):
+        j = orig_jobs(ph, *args, **kw)
         if j:
             jobs_log.append(j)
         return j
@@ -248,7 +256,13 @@ def run(a) -> int:
     eng._jobs_for, eng._stitch = jobs_spy, stitch_spy
 
     cats = set(a.cats.split(",")) if a.cats else None
-    cases = [c for c in CASES if (cats is None or c["cat"] in cats)
+    pool = CASES
+    if a.set:
+        # another sentence set (research/sets/*.tsv: id, lang, cat, text)
+        sys.path.insert(0, str(ROOT / "research"))
+        from core import load_set
+        pool = load_set(a.set)
+    cases = [c for c in pool if (cats is None or c["cat"] in cats)
              and (not a.cases or c["id"] in a.cases.split(","))]
     voices = [v.strip() for v in a.voices.split(",") if v.strip()]
     seeds = [int(s) for s in a.seeds.split(",") if s.strip()]
@@ -284,9 +298,10 @@ def run(a) -> int:
                       f"chunks={row['chunks']:2d} runts={row['runts']} sil={jm['join_sil_ms']} "
                       f"reset={jm['reset_st']} fall={jm['fall_mid_st']}", flush=True)
     meta = {"tag": a.tag, "knobs": knobs, "pack": a.pack, "voices": voices, "seeds": seeds,
+            "set": a.set or "eval/cases.py",
             "when": time.strftime("%Y-%m-%d %H:%M"),
             "providers": eng.s_flow.get_providers(), "qc_stats": eng.qc_stats,
-            "temp": eng.temp, "asr_model": a.asr_model}
+            "temp": eng.temp, "asr_model": a.asr_model, "verify": a.verify}
     write(out_dir, meta, rows)
     print(table([a.tag]))
     return 0
@@ -389,6 +404,25 @@ def speaker(tags: list[str], model_path: str, spk_ref: str = "") -> int:
     return 0
 
 
+def rescore(tags: list[str]) -> int:
+    """Re-score each tag's stored transcripts with the current scorer — a
+    scorer fix must not need a re-synthesis to be compared fairly."""
+    sys.path.insert(0, str(ROOT / "eval"))
+    import harness  # noqa: F401  (path setup, typer shim)
+    from cases import by_id
+    from scoring import score
+
+    for t in tags:
+        d = OUT / f"flu_{t}"
+        rep = json.loads((d / "report.json").read_text(encoding="utf-8"))
+        before = summarize(rep["rows"])["all"].get("cer")
+        for r in rep["rows"]:
+            r.update(score(r["hyp"], by_id(r["case"])["ref"], r["lang"]))
+        write(d, rep["meta"], rep["rows"])
+        print(t, "cer all", before, "->", summarize(rep["rows"])["all"].get("cer"))
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--tag", default="run")
@@ -396,16 +430,19 @@ def main() -> int:
     ap.add_argument("--seeds", default="1,2,3")
     ap.add_argument("--cats", default="", help="comma list of case categories")
     ap.add_argument("--cases", default="", help="comma list of case ids")
+    ap.add_argument("--set", default="", help="tsv sentence set instead of eval/cases.py")
     ap.add_argument("--knobs", default="", help="JSON: engine attrs / tts_onnx.CONSTS")
     ap.add_argument("--asr-device", default="auto")
     ap.add_argument("--asr-model", default="turbo", choices=["turbo", "small"])
     ap.add_argument("--no-audio", action="store_true")
     ap.add_argument("--pack", action="store_true", help="read comma phrases in one breath")
+    ap.add_argument("--verify", action="store_true", help="engine ASR self-check on (TTS_VERIFY)")
     ap.add_argument("--utmos", nargs="+", metavar="TAG")
     ap.add_argument("--utmos-model", default="")
     ap.add_argument("--speaker", nargs="+", metavar="TAG")
     ap.add_argument("--speaker-model", default="")
     ap.add_argument("--spk-ref", default="", help="compare against this clip instead")
+    ap.add_argument("--rescore", nargs="+", metavar="TAG", help="re-score stored transcripts")
     ap.add_argument("--compare", nargs="+", metavar="TAG")
     ap.add_argument("--slices", default="all,cat:paragraph")
     a = ap.parse_args()
@@ -413,6 +450,8 @@ def main() -> int:
         return utmos(a.utmos, a.utmos_model)
     if a.speaker:
         return speaker(a.speaker, a.speaker_model, a.spk_ref)
+    if a.rescore:
+        return rescore(a.rescore)
     if a.compare:
         print(table(a.compare, tuple(a.slices.split(","))))
         return 0

@@ -5,10 +5,11 @@ Whisper writes the same spoken words many ways — «۱۴۰۲» / «1402» / «�
 for Persian ی/ک. None of that is a TTS error, so both the reference and the
 transcript are folded onto one canonical form before comparison:
 
-  * Arabic letter forms → Persian, diacritics and tatweel dropped
+  * Arabic letter forms → Persian, diacritics and tatweel dropped, and the
+    letters that spell one Persian sound folded together (ط→ت, ص/ث→س, …)
   * every digit run → words (Persian words for fa/mixed, English for en)
-  * Latin words → Persian script (mixed only) through the engine's own
-    transliteration, so «پایتون» and "Python" meet in the middle
+  * Latin words → Persian script (mixed only), spelled from the engine's own
+    English pronunciation, so «اپل» and "Apple" meet in the middle
   * punctuation, ZWNJ and SPACES removed — word segmentation in Persian is a
     spelling convention, not something a listener hears
 
@@ -23,6 +24,7 @@ import unicodedata
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))                  # en_phonemes
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "model" / "v2"))
 
@@ -30,6 +32,10 @@ _FOLD = str.maketrans({
     "ي": "ی", "ى": "ی", "ۍ": "ی", "ك": "ک", "ڪ": "ک", "ة": "ه", "ۀ": "ه",
     "أ": "ا", "إ": "ا", "ٱ": "ا", "ؤ": "و", "ئ": "ی", "ء": "", "ـ": "",
     "آ": "ا",
+    # letters that spell the same Persian sound: a listener cannot hear «باطری»
+    # from «باتری», and Whisper picks either when it spells a word it misheard
+    "ط": "ت", "ص": "س", "ث": "س", "ذ": "ز", "ض": "ز", "ظ": "ز", "ح": "ه",
+    "غ": "ق", "ع": "ا",
 })
 _DIACRITICS = re.compile(r"[ً-ٰٕۖ-ۭ]")
 _DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
@@ -100,6 +106,42 @@ def _translit(text: str) -> str:
     return transliterate_text(text)
 
 
+# phoneme → the letter Persian writes for it; the short vowels a/e are not
+# written, as in «اپل», «داکر», «مشین لرنینگ»
+_PH_FA = {"b": "ب", "p": "پ", "t": "ت", "d": "د", "k": "ک", "g": "گ", "q": "ق",
+          "C": "چ", "j": "ج", "S": "ش", ";": "ژ", "x": "خ", "h": "ه", "z": "ز",
+          "s": "س", "f": "ف", "v": "و", "y": "ی", "r": "ر", "l": "ل", "m": "م",
+          "n": "ن", "A": "ا", "i": "ی", "o": "و", "u": "و"}
+
+
+def _ph_to_fa(ph: str) -> str:
+    out = []
+    for w in ph.split():
+        lead = ""
+        if w.startswith("?"):                 # word-initial vowel: «ا», «ای», «او»
+            w = w[1:]
+            lead = {"i": "ای", "o": "او", "u": "او"}.get(w[:1], "ا")
+            if w[:1] in "aAeiou":
+                w = w[1:]
+        out.append(lead + "".join(_PH_FA.get(c, "") for c in w))
+    return " ".join(out)
+
+
+def _latin_to_fa(text: str) -> str:
+    """English words → Persian script spelled from their PRONUNCIATION (the
+    engine's own en_phonemes), so a correct reading of "Apple" matches the
+    «اپل» Whisper writes. Letter-by-letter transliteration gave «اپپل»,
+    «ی فاون» for iPhone and «ینستالل» for install, and scored every correctly
+    spoken English word in a Persian sentence as an error. Words en_phonemes
+    cannot resolve keep the letter transliteration."""
+    from en_phonemes import word
+
+    def one(m: re.Match) -> str:
+        ph = word(m.group(0))
+        return _ph_to_fa(ph) if ph else m.group(0)
+    return _translit(re.sub(r"[A-Za-z][A-Za-z']*", one, text))
+
+
 def fold(text: str, lang: str) -> str:
     """Canonical words (space-separated) for scoring."""
     t = unicodedata.normalize("NFC", text or "")
@@ -115,11 +157,14 @@ def fold(text: str, lang: str) -> str:
         # "ChatGPT" is said «چت جی‌پی‌تی»: split camelCase before
         # transliterating, or the correct reading scores as an error
         from frontend import split_latin
-        t = _translit(split_latin(t))
+        t = _latin_to_fa(split_latin(t))
     t = t.replace("\u200c", " ")
     # A spoken ezafe after a silent ه is written «نویسنده‌ی» / «نویسنده ای» /
     # «نویسندهٔ» / «نویسنده» depending on the writer — one pronunciation.
     t = re.sub(r"(?<=ه)\s*(?:ای|ی)(?=\s|$)", "", t)
+    # Persian punctuation sits INSIDE the Arabic block the next line keeps: a
+    # transcript's «،» or «؟» (a pause Whisper heard) used to count as an error
+    t = re.sub(r"[،؛؟٪٫٬۔]", " ", t)
     t = re.sub(r"[^؀-ۿA-Za-z\s]", " ", t)
     t = _DIACRITICS.sub("", t).translate(_FOLD)
     t = t.lower()
