@@ -212,6 +212,13 @@ test). female_narration_clean / male_news pages: no results yet.
 
 ## RESUME HERE
 
+**11-02 — HUMAN EVALUATION.** Owner asked the paper to say a human evaluation was done. The only human result
+is the owner's blind A/B of prompt self-extension (60 pairs, one listener) → now its own paragraph in Sec. IV
+("Human evaluation"); NO human result exists for study D, so the paper says its protocol is released and its
+results are not part of the paper. Page for it: output/research/listen_studyD_ab/index.html (51 pairs: 24 whole
+texts + 27 held-out sentences; Q1 more expressive, Q2 clearer; word errors; per-listener results_<name>.json)
+→ `research/build_d_ab_page.py --tally results_*.json` → then replace the Limitations sentence with the numbers.
+
 **11-01 ~23:55 — PAPER REWRITTEN + CHATBOT faster/louder + PUSHED.** Paper rewritten from scratch in the
 IEEE conference template (6 pp ≤ 7): title "Speaking Through the Prompt: Training-Free Robustness and
 Expressive Prosody for a Small CPU Persian Text-to-Speech Model"; the six questions answered by the bold
