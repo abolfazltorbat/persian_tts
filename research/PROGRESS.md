@@ -212,6 +212,21 @@ test). female_narration_clean / male_news pages: no results yet.
 
 ## RESUME HERE
 
+**11-01 ~23:55 — PAPER REWRITTEN + CHATBOT faster/louder + PUSHED.** Paper rewritten from scratch in the
+IEEE conference template (6 pp ≤ 7): title "Speaking Through the Prompt: Training-Free Robustness and
+Expressive Prosody for a Small CPU Persian Text-to-Speech Model"; the six questions answered by the bold
+run-in heads of the Introduction (Topic / theory / practice / challenges / proposal / results vs. prior
+work); new figures: fig_concept.tex (TikZ idea figure), fig_robust.pdf + fig_expr.pdf (research/fig_v3.py,
+contours by research/fig_contours.py); numbers now black (\RES switch in the preamble). Old text:
+paper/main_before_rewrite_2026-11-01.tex. Code URL in the paper: github.com/abolfazltorbat/persian_tts
+(pushed 9a09d23 — the repo is PRIVATE; make it public or anonymise before submission).
+Chatbot: TTS_BASE_PACE 1.06 (× requested pace; in the cache key), level_target 0.16 + limiter 0.95
+(speech −16.3 → −14.5 dBFS), WSOLA always (pace probe: WSOLA 1.06 UTMOS −.04, pedalboard −.80;
+research/pace_probe.py), ENGINE_REVISION 2026.11.01c, 212 TTS tests pass, mirror dry-run OK; chatbot
+NOT committed (CHANGES_2026_11_01_SPEECH_EXPRESSIVE.md). Prompt TEMPO also transfers (style5: prompt
+×1.1 faster → take ×1.02–1.09, UTMOS +.07) but round-trip prompts for every sentence were not tested
+on short units (study B saw a round-tripped extension hurt them) → not adopted.
+
 **11-01 ~22:40 — STUDY D DONE (see "Study D", FINAL bullet).** Prompt styling (lively prompt for
 exclamations / surprised questions; half register for high voices) + v2 rule (endings, energy ramp, loudness
 plan) adopted upstream (`intonation=1` = v2; `prompt_styles` default None) and in the chatbot product config.
