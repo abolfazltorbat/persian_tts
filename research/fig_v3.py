@@ -61,7 +61,7 @@ def fig_robust() -> None:
     ax = fig.add_subplot(gs[0, 0])
     # rows: label, blocks [(width, colour, text, abrupt)], failed takes of 360 (dev, male+female)
     OWN = "#fbd9c7"
-    rows = [("training", [(2.15, CLIP, "audio before the cut", False), (2.0, TARGET, "target (text given)", False)], None),
+    rows = [("training", [(2.15, CLIP, "utterance up to a cut", False), (2.0, TARGET, "rest of it (text given)", False)], None),
             ("plain clip", [(0.8, CLIP, "clip", True), (2.0, TARGET, "take", False)], 25),
             ("clip twice", [(0.8, CLIP, "clip", True), (0.8, CLIP, "clip", True), (2.0, TARGET, "take", False)], 35),
             ("ours", [(0.8, CLIP, "clip", False), (1.45, OWN, "own sentence.", False),
@@ -91,7 +91,7 @@ def fig_robust() -> None:
     ax.set_xlim(-1.25, 7.9)
     ax.set_ylim(ys[-1] - 0.6, ys[0] + 0.6)
     ax.axis("off")
-    ax.set_title("(a) a prompt must end like a training prompt: at a finished sentence", loc="left", color=INK)
+    ax.set_title("(a) the prompt must end at a finished sentence", loc="left", color=INK)
     # (b) held-out: new clips by how they end + the default voice
     bx = fig.add_subplot(gs[0, 1])
     groups = [("ends a\nsentence", 6, 4, 150), ("ends at\na comma", 20, 11, 150), ("ends mid-\nclause", 70, 4, 150),

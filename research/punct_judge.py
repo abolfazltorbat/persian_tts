@@ -56,7 +56,7 @@ def main() -> int:
     ap.add_argument("paths", nargs="*")
     ap.add_argument("--out", default="")
     ap.add_argument("--set", default=",".join(str(ROOT / f"research/sets/{n}.tsv")
-                                              for n in ("prosody_set", "prosody_set2")))
+                                              for n in ("prosody_set", "prosody_set2", "short_test")))
     ap.add_argument("--real", action="store_true")
     ap.add_argument("--device", default="auto")
     a = ap.parse_args()

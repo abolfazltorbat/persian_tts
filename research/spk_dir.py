@@ -19,7 +19,10 @@ for d in map(Path, sys.argv[1:]):
             continue
         v = parts[1]
         if v not in refs:
-            refs[v] = emb.embed(str(ROOT / "voices" / f"{v}.wav"))
+            for d0 in (ROOT / "voices", ROOT / "output/research/voices_shemo", ROOT / "output/research/voices_new"):
+                if (d0 / f"{v}.wav").exists():
+                    refs[v] = emb.embed(str(d0 / f"{v}.wav"))
+                    break
         rows.append({"wav": w.name, "spk": round(float(refs[v] @ emb.embed(str(w))), 4)})
     (d / "spk.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     print(d, len(rows), "mean", round(sum(r["spk"] for r in rows) / max(1, len(rows)), 4))

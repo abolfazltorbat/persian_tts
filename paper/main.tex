@@ -48,9 +48,10 @@ fail in two ways that their size and training rule out fixing by retraining: the
 and, trained on text stripped of punctuation, they read every question and exclamation as a flat statement.
 We study both in a public 110M-parameter Persian model and show that the model's second input --- the voice
 prompt it continues --- is a control surface that solves both at inference time. \emph{Robustness:} failures
-depend on how the prompt \emph{ends}; extending the reference clip with the model's own reading of one
-neutral sentence makes every prompt end, as training prompts do, at a finished sentence, which halves failed
-renders on held-out short sentences (\RES{24$\to$12} of \RES{900}) and rescues a clip cut mid-clause
+depend on how the prompt \emph{ends}. The model was trained to continue the prompt's own utterance, but at
+inference its text is a new sentence; extending the reference clip with the model's own reading of one
+neutral sentence makes every prompt end at a finished sentence, so the text reads as the next sentence,
+which halves failed renders on held-out short sentences (\RES{24$\to$12} of \RES{900}) and rescues a clip cut mid-clause
 (\RES{44\%$\to$3\%} error) at no per-request cost. \emph{Expressiveness:} the prompt also carries register
 and pitch range; a re-pitched, widened copy of that reading makes the model itself speak exclamations and
 surprise livelier (pitch range \RES{+38\%}), while a light rule restores only what no prompt can --- the
@@ -107,7 +108,7 @@ short audio, and there is no cheap judge of prosody.
 
 \textbf{What we propose.} (i)~\emph{Prompt self-extension:} once per voice the model reads one neutral
 sentence; every later take is conditioned on the reference clip followed by that reading, so the prompt ends
-at a finished sentence, as training prompts do (C1). (ii)~\emph{Prompt styling:} the same reading,
+at a finished sentence and the text it is given can be its next sentence (C1). (ii)~\emph{Prompt styling:} the same reading,
 re-pitched, widened and made louder by signal processing, is the prompt for exclamations and surprised
 questions, so the model itself speaks them higher and livelier; only the prompt is processed (C2).
 (iii)~\emph{An ending rule and a loudness plan} that restore, from the written mark, only what no prompt can
@@ -148,8 +149,10 @@ G2P \cite{homorich2025}, the ShEMO emotional speech corpus \cite{shemo2019} and 
 \section{Model, Engine and Measurement}\label{sec:measure}
 \textbf{Model and engine.} pocket-tts-farsi-v2 \cite{farsiv2} is a 6-layer student (110M parameters) over
 24\,kHz Mimi latents at 12.5\,Hz \cite{moshi2024}. Each generation unit is
-\texttt{[BOS, voice prompt, phonemes, latents\ldots]}; in training the prompt was the audio \emph{preceding}
-a random word boundary of the same recording, at most 5\,s. A front end splits text into sentences and
+\texttt{[BOS, voice prompt, phonemes, latents\ldots]}. In training, each utterance was cut at a random
+boundary between two aligned words: the audio before the cut (at most 5\,s) is the prompt, and the target
+is the \emph{rest of the same utterance} with its remaining words as text \cite{farsiv2}. The model thus
+learns to continue the prompt's utterance; at inference the text is a new sentence instead. A front end splits text into sentences and
 phrases, keeps each sentence's written type, and packs phonemes into units of at most 30 tokens; the G2P
 drops punctuation, and the training transcripts were phonemised with \fa{«؟»} removed (it shares a symbol
 with the glottal stop), so the model has no sentence mark at all.
@@ -188,25 +191,30 @@ they miss. The engine's own retry rule rejects \RES{29\%} of takes, \RES{96\%} o
 \centering
 \includegraphics[width=\textwidth]{figures/fig_robust.pdf}
 \caption{How the prompt ends decides whether a short sentence survives. (a) Prompt layouts (zig-zag: the
-prompt stops mid-utterance) and the share of failed short takes on development units (male and female voice,
-consensus judge). Only a prompt ending at a finished sentence helps; more of the same clip does not, the same
+prompt stops mid-utterance) and the share of failed short takes on development units (30 sentences $\times$ 6
+seeds $\times$ 2 voices = 360 per row, consensus judge). In training the text continues the prompt's utterance. Only a prompt ending at a finished sentence helps; more of the same clip does not, the same
 extension cut short multiplies failures, and with the clip last the model reads the extension aloud.
 (b) Held-out: new real clips cut 0.02\,s after their last sound, by where they end, and the engine's
 default voice; the less finished the clip's ending, the larger the gain.}
 \label{fig:robust}
 \end{figure*}
 
-\textbf{Prompt self-extension.} A cleaned reference clip stops right after its last phoneme, so the prompt
-asks the model to continue an unfinished utterance with words it was not given; short targets, with the
-least room to recover, suffer most. Once per voice, the model reads one neutral sentence
+\textbf{Prompt self-extension.} In training the text always continues the prompt's utterance; at inference
+it never does. A reference clip cut right after its last phoneme, usually mid-utterance, therefore asks
+for a continuation of \emph{its} utterance that the given words cannot provide, and short targets, with
+the least room to recover, suffer most. Among training cuts, only those that happen to fall at a sentence
+boundary have a new sentence as their continuation; a prompt that ends at a finished sentence puts every
+inference into that case. We do not claim that training prompts typically end at sentences --- most
+random word boundaries fall inside one --- but that this is the subset whose continuation matches ours. Once per voice, the model reads one neutral sentence
 (\fa{«امروز هوا کمی سرد است و باد می‌وزد.»}, ``it is a little cold today and the wind blows'') from the
 plain clip four times with fixed seeds; the take of median speech length (no recogniser) is kept, as raw
 latents, up to its speech end plus one frame. Every later unit is conditioned on the clip followed by the
 last $(5\,\text{s} - |\text{clip}|)$ of this extension. The prompt is encoded once into the key--value cache
 that every unit already copies, so a request costs nothing extra.
 
-\textbf{It is the ending that matters} (Fig.~\ref{fig:robust}a). On 180 paired short development takes per
-voice, the extension cuts failures from \RES{25} to \RES{10} of \RES{360}. Repeating the clip, which adds speech
+\textbf{It is the ending that matters} (Fig.~\ref{fig:robust}a). On 30 short development sentences
+$\times$ 6 seeds for each of two voices (male 1.36\,s and female 2.0\,s clip; 360 paired takes per layout),
+the extension cuts failures from \RES{25} to \RES{10}. Repeating the clip, which adds speech
 but keeps the abrupt ending, does not help (\RES{35}); the same extension cut after two thirds --- same voice,
 same latents, unfinished --- multiplies failures (\RES{120}); and with the clip placed last the model reads the
 extension aloud instead of the text in \RES{94--99\%} of takes (\fa{«بله»} comes out as
@@ -223,19 +231,19 @@ on development data.
 \toprule
 measure & clip & clip + ext. & change [CI] \\
 \midrule
-\multicolumn{4}{l}{\emph{short set: 60 sentences $\times$ 6 seeds $\times$ 3 voices}} \\
-failed renders (Persian, 900) & \RES{24} & \RES{12} & \\
+\multicolumn{4}{l}{\emph{short set: 50 fa + 10 Eng./mixed sentences $\times$ 6 seeds $\times$ 3 voices}} \\
+failed renders (of 900 fa) & \RES{24} & \RES{12} & \\
 consensus CER & \RES{.032} & \RES{.022} & \RES{$-$.011 [$-$.017, $-$.004]} \\
 \quad default voice (1.36\,s clip) & \RES{.060} & \RES{.039} & \RES{$-$.021 [$-$.036, $-$.008]} \\
-UTMOS / speaker sim.\ change & & & \RES{+.13 / $-$.012} \\
+UTMOS / spk.\ change (1{,}080) & & & \RES{+.13 / $-$.012} \\
 \quad speaker-matched extension take & & & \RES{+.18 / +.009} \\
 \midrule
-\multicolumn{4}{l}{\emph{three new real clips cut 0.02\,s after speech, 3 seeds}} \\
-failed renders (450) & \RES{96} & \RES{19} & \RES{$-$.167 [$-$.233, $-$.106]} \\
+\multicolumn{4}{l}{\emph{3 new real clips cut 0.02\,s after speech; 50 fa sentences, 3 seeds}} \\
+failed renders (of 450) & \RES{96} & \RES{19} & \RES{$-$.167 [$-$.233, $-$.106]} \\
 \quad clip ending mid-clause, CER & \RES{.441} & \RES{.030} & \RES{$-$.411 [$-$.546, $-$.288]} \\
 \midrule
-\multicolumn{4}{l}{\emph{bench: 79 mixed cases incl.\ paragraphs, numbers, English}} \\
-consensus CER (Persian) & \RES{.029} & \RES{.023} & \RES{$-$.006 [$-$.010, $-$.001]} \\
+\multicolumn{4}{l}{\emph{bench: 79 mixed cases $\times$ 3 seeds (55 fa cases scored)}} \\
+consensus CER & \RES{.029} & \RES{.023} & \RES{$-$.006 [$-$.010, $-$.001]} \\
 pitch reset at chunk joins (st) & \RES{5.25} & \RES{3.92} & \RES{$-$1.33 [$-$1.95, $-$.77]} \\
 \midrule
 \multicolumn{4}{l}{\emph{default voice, one take instead of the 3-take retry loop}} \\
@@ -249,7 +257,8 @@ generations per unit & \RES{2.1} & \RES{1.0} & \\
 rendered through the full production path, failed renders halve and UTMOS rises for every voice. The
 prediction of the mechanism holds on three \emph{new} real clips cut 0.02\,s after their last sound: the
 sentence-final clip improves slightly, the comma clip halves its error, and the mid-clause clip, nearly
-unusable alone, becomes ordinary. On a mixed bench of long and code-mixed text, error also falls, and units
+unusable alone, becomes ordinary --- although the mid-clause clip ends at a word boundary just as training
+prompts do, which is why we place the mechanism in what the text must continue, not in the cut itself. On a mixed bench of long and code-mixed text, error also falls, and units
 of one sentence sound less like separate sentences (smaller pitch reset at joins). With the extension a single
 take beats the engine's three-take loop, so retries can be dropped and the generation work halves; on 40
 assistant-style replies this configuration is no worse on any measure with \RES{28\%} fewer generations.
@@ -257,7 +266,7 @@ The cost is speaker similarity on one voice (female, \RES{$-$0.03}); choosing th
 similarity removes it (\RES{+0.009} pooled) at part of the intelligibility gain. English sentences, read
 through mapped Persian phonemes, keep the plain clip.
 
-\textbf{Human evaluation.} A native Persian listener compared plain and extended prompts blind: \RES{60} pairs of
+\textbf{A first listening check.} A native Persian listener compared plain and extended prompts blind: \RES{60} pairs of
 held-out short sentences in the default voice, same seed, left/right at random, choosing the better reading
 or ``same'' and marking any word error. Preference did not differ (same \RES{33}, plain \RES{15}, extended
 \RES{12}; sign test $p=\RES{.70}$); word errors were marked in \RES{7} plain and \RES{5} extended renders
@@ -366,19 +375,47 @@ from zero-frequency filtering \cite{zff2008} made TD-PSOLA rougher on codec spee
 but cost \RES{2.1} points of error. The clarity gain that held up was structural: moving the expressive
 work from the signal into the prompt.
 
+\IfFileExists{figures/human_eval.tex}{%
+\begin{table}[t]
+\caption{Listening test (\HEN\ native listeners; 95\% CIs over listeners, Wilson intervals for proportions)}\label{tab:human}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{2.4pt}
+\begin{tabular}{lcc}
+\toprule
+measure & shipped / plain & ours \\
+\midrule
+\input{figures/human_eval.tex}
+\bottomrule
+\end{tabular}
+\end{table}}{}
+
+\textbf{Listening test.} To check these acoustic and recogniser-based findings by ear we built a blind,
+15-minute listening test for native Persian listeners (page and scoring script in the repository).
+\emph{Part~1} plays single clips with the text shown \emph{without} its final mark; the listener labels each
+a statement, a question or an exclamation/surprise and rates its naturalness (MOS, 1--5). Minimal pairs are
+split so that a listener hears only one member: the statement, or the question in one system's version.
+\emph{Part~2} compares the shipped and our versions of 8 whole texts and 8 sentences (CMOS, $-$3..+3, for
+naturalness; which one conveys the punctuation better). \emph{Part~3} rates 24 short replies, plain vs.\
+extended prompt, for clarity (1--5) and word errors. Assignments follow a Latin square over listeners;
+we report bootstrap CIs over listeners, Wilson intervals for identification rates, sign tests, and
+inter-rater agreement (Krippendorff's $\alpha$ for ratings, Fleiss' $\kappa$ for labels).
+\IfFileExists{figures/human_eval.tex}{Table~\ref{tab:human} gives the results of \HEN\ listeners.}{%
+The test targets 20--30 listeners; its results are not yet included.}
+
 \section{Discussion and Limitations}\label{sec:discussion}
-\textbf{One mechanism, two uses.} Both methods follow from how the model was trained: the prompt was the audio
-just before the target. A prompt that stops on a finished sentence asks for a new utterance; one that stops
+\textbf{One mechanism, two uses.} Both methods follow from how the model was trained: the prompt was the
+start of the very utterance the target completes. Ending the prompt at a finished sentence makes ``a new
+sentence'' a valid continuation, as at the sentence-boundary cuts of training; a prompt that stops
 mid-phrase asks the model to finish something it was not given the words for, and short targets come out
-truncated or replaced by a replay of the prompt. And because the model learned to continue a speaker, it
+truncated or replaced by a replay of the prompt. How often training cuts fell at sentence boundaries we could
+not measure, because the training manifests are not public. And because the model learned to continue a speaker, it
 continues that speaker's register and liveliness too --- so the prompt can carry delivery the text cannot. The
 same reasoning applies to any continuation TTS model, and the split of labour --- prompt for the body of a
 sentence, a rule for its boundary tone --- to any model trained on text without punctuation.
 
-\textbf{Limitations.} One model and five voice clips (three of one speaker). The human evaluation of
-robustness has one listener and 60 pairs; that of expressiveness is a blind A/B protocol (51 pairs of whole
-texts and held-out sentences, two questions per pair) released with the code, whose results are not part of
-this paper. Expressiveness is therefore measured acoustically and
+\textbf{Limitations.} One model family is tuned and evaluated in depth. Perceptual evidence rests on the
+listening test above; the first check had one listener. Expressiveness is also measured acoustically and
 through one recogniser whose question rate is itself only \RES{39\%} on real expressive speech; the
 expressive reference (ShEMO) is acted radio speech whose texts we attached by recogniser matching
 (\RES{279} of \RES{760} clips) and which has no speaker labels. Style strengths and the extension sentence are
