@@ -241,6 +241,7 @@ failed renders (of 450) & \RES{96} & \RES{19} & \RES{$-$.167 [$-$.233, $-$.106]}
 \multicolumn{4}{l}{\emph{nine more speakers (ShEMO), 50 fa sentences $\times$ 2 seeds}} \\
 failed renders (of 900) & \RES{69} & \RES{28} & \\
 consensus CER & \RES{.070} & \RES{.033} & \RES{$-$.037 [$-$.053, $-$.024]} \\
+UTMOS / spk.\ change & & & \RES{$-$.12 / $-$.021} \\
 \midrule
 \multicolumn{4}{l}{\emph{bench: 79 mixed cases $\times$ 3 seeds (55 fa cases scored)}} \\
 consensus CER & \RES{.029} & \RES{.023} & \RES{$-$.006 [$-$.010, $-$.001]} \\
@@ -273,6 +274,9 @@ renders fell from \RES{69} to \RES{28} of \RES{900} and the consensus error from
 (change \RES{$-$3.7} points, CI \RES{[$-$5.3, $-$2.4]}). The gain was significant for five voices, largest for
 the two whose plain clips failed most (\RES{30$\to$3} and \RES{10$\to$1} failures); three were unchanged and one
 got worse (\RES{1$\to$10} failures), so the extension is a strong default but not a guarantee for every clip.
+On these radio-play voices it also costs naturalness and voice fidelity: UTMOS \RES{$-$0.12} pooled (up for
+three voices, down for six) and speaker similarity \RES{$-$0.021}. Choosing the extension take by speaker
+similarity, which removed this cost on our voices, was not applied here.
 
 \textbf{A second model.} Qwen3-TTS-0.6B-Base \cite{qwen3tts2026} also clones a voice by continuation, from the
 reference audio \emph{and} its transcript, over discrete 12\,Hz codec tokens. We built its extension the same
