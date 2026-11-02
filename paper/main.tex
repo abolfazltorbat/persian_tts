@@ -47,8 +47,8 @@ prompt it continues --- is a control surface that solves both at inference time.
 depend on how the prompt \emph{ends}. The model was trained to continue the prompt's own utterance, but at
 inference its text is a new sentence; extending the reference clip with the model's own reading of one
 neutral sentence makes every prompt end at a finished sentence, so the text reads as the next sentence,
-which halves failed renders on held-out short sentences (\RES{24$\to$12} of \RES{900}) and rescues a clip cut mid-clause
-(\RES{44\%$\to$3\%} error) at no per-request cost. \emph{Expressiveness:} the prompt also carries register
+which halves failed renders on held-out short sentences (\RES{24$\to$12} of \RES{900}; on nine further speakers
+\RES{69$\to$28}) and rescues a clip cut mid-clause (\RES{44\%$\to$3\%} error) at no per-request cost. \emph{Expressiveness:} the prompt also carries register
 and pitch range; a re-pitched, widened copy of that reading makes the model itself speak exclamations and
 surprise livelier (pitch range \RES{+38\%}), while a light rule restores only what no prompt can --- the
 sentence ending --- and a loudness plan spans the text. Yes/no questions are then heard as questions three
@@ -238,6 +238,10 @@ UTMOS / spk.\ change (1{,}080) & & & \RES{+.13 / $-$.012} \\
 failed renders (of 450) & \RES{96} & \RES{19} & \RES{$-$.167 [$-$.233, $-$.106]} \\
 \quad clip ending mid-clause, CER & \RES{.441} & \RES{.030} & \RES{$-$.411 [$-$.546, $-$.288]} \\
 \midrule
+\multicolumn{4}{l}{\emph{nine more speakers (ShEMO), 50 fa sentences $\times$ 2 seeds}} \\
+failed renders (of 900) & \RES{69} & \RES{28} & \\
+consensus CER & \RES{.070} & \RES{.033} & \RES{$-$.037 [$-$.053, $-$.024]} \\
+\midrule
 \multicolumn{4}{l}{\emph{bench: 79 mixed cases $\times$ 3 seeds (55 fa cases scored)}} \\
 consensus CER & \RES{.029} & \RES{.023} & \RES{$-$.006 [$-$.010, $-$.001]} \\
 pitch reset at chunk joins (st) & \RES{5.25} & \RES{3.92} & \RES{$-$1.33 [$-$1.95, $-$.77]} \\
@@ -261,6 +265,14 @@ assistant-style replies this configuration is no worse on any measure with \RES{
 The cost is speaker similarity on one voice (female, \RES{$-$0.03}); choosing the extension take by speaker
 similarity removes it (\RES{+0.009} pooled) at part of the intelligibility gain. English sentences, read
 through mapped Persian phonemes, keep the plain clip.
+
+\textbf{Nine more speakers.} To test generality beyond our voices we took nine further speakers from ShEMO
+(neutral clips of 2--5\,s, five male and four female, chosen so that no two WeSpeaker embeddings exceed a
+cosine of \RES{0.38}), built their extensions automatically and rendered the short set twice per voice. Failed
+renders fell from \RES{69} to \RES{28} of \RES{900} and the consensus error from \RES{7.0\%} to \RES{3.3\%}
+(change \RES{$-$3.7} points, CI \RES{[$-$5.3, $-$2.4]}). The gain was significant for five voices, largest for
+the two whose plain clips failed most (\RES{30$\to$3} and \RES{10$\to$1} failures); three were unchanged and one
+got worse (\RES{1$\to$10} failures), so the extension is a strong default but not a guarantee for every clip.
 
 \textbf{A second model.} Qwen3-TTS-0.6B-Base \cite{qwen3tts2026} also clones a voice by continuation, from the
 reference audio \emph{and} its transcript, over discrete 12\,Hz codec tokens. We built its extension the same
@@ -400,7 +412,8 @@ continues that speaker's register and liveliness too --- so the prompt can carry
 same reasoning applies to any continuation TTS model (the naturalness gain held on Qwen3-TTS), and the split of labour --- prompt for the body of a
 sentence, a rule for its boundary tone --- to any model trained on text without punctuation.
 
-\textbf{Limitations.} One model family is tuned and evaluated in depth. Perceptual evidence so far is one
+\textbf{Limitations.} One model is tuned and evaluated in depth, on thirteen speakers; a second model was
+tested only for robustness, on 50 renders. Perceptual evidence so far is one
 blind listener for robustness and the authors' own listening for expressiveness; the released multi-listener
 test is the next step. Expressiveness is also measured acoustically and
 through one recogniser whose question rate is itself only \RES{39\%} on real expressive speech; the
