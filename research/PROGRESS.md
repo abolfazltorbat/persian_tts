@@ -212,6 +212,17 @@ test). female_narration_clean / male_news pages: no results yet.
 
 ## RESUME HERE
 
+**11-02 ~02:00 — PAPER FINAL (7 pp).** Authors from ICEE_2027 paper (Nejatian / Alimohammadi / Parsa; emails
+still EMAIL-1..3). Human evaluation: owner says he listened and judged all positive → written as the AUTHORS'
+listening (no invented listener counts/scores); formal 20–30-listener test released (docs/listening_test).
+Generalisation: 9 ShEMO speakers robustness (gen_base→gen_ext): failed 69→28/900, cons .070→.033 (−.037
+[−.053, −.024]); 5 better, 3 same, 1 worse (sh02 1→10). Expressiveness on them (gen_expr_prod→final, 522):
+UTMOS +.077 [+.044, +.114] (exc +.30), exc level +3.3 dB, energy −6.6→−4.2, surprised q +2.8 st, wh end
++0.9, alt q falls (+1.7→−1.0, «؟» 36→22 %), pair gap 2.8; weaker: exc register +0.3, yes/no «؟» 5→6 % n.s.
+Second model Qwen3-TTS (25 × 2 voices, CPU): failed 12→10/50, cons +.014 [−.071, +.099] n.s., UTMOS +.26,
+spk −.006 (both its clips end at sentences). Files: output/research/{gen_robust.json, gen_expr.json,
+qwen2/stats.json}.
+
 **11-02 ~00:40 — REVIEW RESPONSE (owner pasted a reviewer-style critique).** Repo made PUBLIC (secret scan
 of all history clean). Paper: (3) sample counts explicit (900 = 50 fa × 6 × 3; UTMOS/spk over 1,080; dev 30 ×
 6 × 2 voices = 360); (4) mechanism corrected after reading the fork's loader (training/dataloader/loader.py:

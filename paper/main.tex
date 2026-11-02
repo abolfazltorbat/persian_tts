@@ -385,6 +385,16 @@ against \RES{$-$0.24}). Through whole texts, sentence loudness varies twice as m
 costs are a small loss of speaker similarity on exclamations (\RES{$-$0.028}) and of UTMOS on surprised one-
 and two-word questions (\RES{$-$0.25}), where both the rise and the prompt act on very little audio.
 
+\textbf{Nine more speakers.} On the nine ShEMO voices of Sec.~\ref{sec:robust} (held-out sentences, one seed,
+522 renders per system) the comparison with the shipped engine holds in direction and the quality cost
+disappears: UTMOS rises overall (\RES{+0.08}, CI \RES{[+0.04, +0.11]}) and most on exclamations (\RES{+0.30}),
+which also come out \RES{3.3}\,dB louder with their energy kept up (\RES{$-$6.6$\to$$-$4.2}\,dB); surprised
+questions are spoken \RES{2.8}\,st higher and end \RES{2.4}\,st higher; wh-questions end \RES{0.9}\,st higher;
+alternative questions fall again (\RES{+1.7$\to$$-$1.0}\,st) and are heard as yes/no questions less often
+(\RES{36\%$\to$22\%}); the question--statement gap stays (\RES{+2.8}\,st). Two effects are weaker on these
+voices: the register lift of exclamations (\RES{+0.3}\,st) and the recogniser's question rate for yes/no
+questions (\RES{5\%$\to$6\%}, n.s.).
+
 \textbf{What did not improve clarity.} The default voice renders \RES{10}\,dB weaker at 2.5--6\,kHz than its
 own clip, but equalising each render toward the clip lowered UTMOS and DNSMOS SIG (\RES{$-$0.06} each);
 equalising the prompt instead brightened the take by \RES{4.5}\,dB at a cost in speaker similarity; pitch marks
